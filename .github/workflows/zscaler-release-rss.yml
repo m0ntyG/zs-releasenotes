@@ -2,15 +2,23 @@ name: Zscaler Help Releases RSS
 
 on:
   schedule:
-    - cron: "*/30 * * * *"  # alle 30 Minuten
+    - cron: "*/30 * * * *"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      BACKFILL_DAYS: "14"    # Zeitfenster: 14 Tage
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Python
         uses: actions/setup-python@v5
