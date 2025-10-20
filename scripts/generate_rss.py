@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Zscaler Help Releases RSS Generator (robust)
+Zscaler Help Releases RSS Generator (vollständige Sitemap-Nutzung)
 
-- Crawlt automatisch help.zscaler.com über die Sitemap (inkl. .xml.gz),
-  findet alle Release-Notes- und What's-New-Seiten (inkl. neuer Produkte)
-  und extrahiert Artikel/Einträge.
-- Baut einen RSS-Feed und schreibt ihn nach ./public/rss.xml.
-- Optionales Zeitfenster über BACKFILL_DAYS (Standard: 14 Tage).
+- Nutzt die komplette Sitemap (inkl. Sub-Sitemaps und .xml.gz) von help.zscaler.com.
+- Filtert alle relevanten Seiten (Release Notes & What's New) direkt aus der Sitemap.
+- Extrahiert Titel & Veröffentlichungsdatum je Seite und erstellt einen RSS-Feed.
+- Beschränkt den Feed optional mit BACKFILL_DAYS (Standard: 14, z. B. 90).
 
 Voraussetzungen:
   pip install requests beautifulsoup4 feedgen python-dateutil lxml
@@ -14,9 +13,9 @@ Voraussetzungen:
 
 import os
 import re
-import time
-import gzip
 import io
+import gzip
+import time
 import requests
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin, urlparse
@@ -28,32 +27,29 @@ from dateutil import parser as dateparser
 BASE = "https://help.zscaler.com"
 SITEMAP_URL = f"{BASE}/sitemap.xml"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; Zscaler-Release-RSS/1.1; +https://www.zscaler.com)",
+    "User-Agent": "Mozilla/5.0 (compatible; Zscaler-Release-RSS/2.0; +https://www.zscaler.com)",
     "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8"
 }
 OUTPUT_DIR = os.path.join(os.getcwd(), "public")
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "rss.xml")
 
-# Muster für relevante Seiten
-RELEASE_PAGE_PATTERNS = [
-    re.compile(r"/[a-z0-9-]+/release-notes/?$", re.I),   # z.B. /zia/release-notes
-    re.compile(r"/release-notes/?$", re.I),              # generische Pfade
+# Relevanz-Hinweise für Seiten aus der Sitemap
+# Wir berücksichtigen gezielt Release-Notes- und What's-New-Pfade.
+URL_INCLUDE_HINTS = [
+    "release-notes",        # typische Pfade für Release Notes
+    "whats-new",            # What's New Übersicht
+    "what's-new",           # alternative Schreibweise
 ]
-WHATS_NEW_PATTERNS = [
-    re.compile(r"/whats-new/?$", re.I),
-    re.compile(r"/what's-new/?$", re.I),
-]
-ARTICLE_URL_HINTS = ["release", "notes", "whats-new", "what's-new", "new"]
+# Optional: zusätzliche Hinweise, aber mit Vorsicht (zu breit bedeutet Rauschen)
+# URL_INCLUDE_HINTS += ["release", "notes"]
 
-# Fallback-Quellen, falls Sitemap leer oder fehlerhaft
-FALLBACK_SOURCES = [
-    f"{BASE}/whats-new",
-    f"{BASE}/zia/release-notes",
-    f"{BASE}/zpa/release-notes",
-    f"{BASE}/zdx/release-notes",
-    f"{BASE}/workload-segmentation/release-notes",
-    f"{BASE}/zscaler-private-access/release-notes",  # gelegentliche Alias-Pfade
+# Ausschlussmuster (um offensichtliche Nicht-Artikel zu vermeiden)
+URL_EXCLUDE_HINTS = [
+    "/tag/", "/taxonomy/", "/author/", "/search", "/attachment", "/node/",
 ]
+
+# Minimal-Pause zwischen Abrufen (freundliches Crawling)
+FETCH_DELAY_SEC = 0.3
 
 
 def fetch(url: str, timeout: int = 30) -> str:
@@ -69,36 +65,33 @@ def fetch_bytes(url: str, timeout: int = 30) -> bytes:
 
 
 def maybe_decompress_sitemap(url: str, content: bytes) -> bytes:
-    # Entpacke, wenn URL auf .gz endet oder Content-Type gzip ist
-    ct = ""
+    # Entpacken, wenn URL .gz endet oder der Content tatsächlich gzipped ist
     try:
-        # Wir holen den Content-Type mit eine leichte HEAD-Anfrage (optional)
-        head = requests.head(url, headers=HEADERS, timeout=15, allow_redirects=True)
-        ct = head.headers.get("Content-Type", "")
-    except Exception:
-        pass
-
-    if url.lower().endswith(".gz") or ("gzip" in ct.lower() or "x-gzip" in ct.lower()):
-        try:
+        # Wenn es nach gzip aussieht, versuche zu entpacken
+        if url.lower().endswith(".gz"):
             with gzip.GzipFile(fileobj=io.BytesIO(content)) as gz:
                 return gz.read()
-        except Exception as e:
-            print(f"[WARN] Gzip-Entpackung fehlgeschlagen für {url}: {e}")
+        # Einige Server senden ungekennzeichnete gzip-Daten; heuristischer Versuch
+        if content[:2] == b"\x1f\x8b":
+            with gzip.GzipFile(fileobj=io.BytesIO(content)) as gz:
+                return gz.read()
+    except Exception as e:
+        print(f"[WARN] Gzip-Entpackung fehlgeschlagen für {url}: {e}")
     return content
 
 
 def is_help_domain(url: str) -> bool:
     try:
         p = urlparse(url)
-        return p.netloc.endswith("help.zscaler.com")
+        return p.scheme in ("http", "https") and p.netloc.endswith("help.zscaler.com")
     except Exception:
         return False
 
 
 def parse_sitemap(url: str) -> list[str]:
     """
-    Lädt sitemap.xml oder eine Sub-Sitemap. Unterstützt sitemapindex mit rekursiver Auflösung.
-    Liefert alle <loc>-URLs zurück, tolerant gegenüber Namespaces und gzip.
+    Lädt sitemap.xml oder eine Sub-Sitemap. Unterstützt sitemapindex rekursiv und .xml.gz.
+    Gibt eine flache Liste aller <loc>-URLs zurück.
     """
     try:
         raw = fetch_bytes(url)
@@ -114,39 +107,30 @@ def parse_sitemap(url: str) -> list[str]:
         return []
 
     def localname(tag: str) -> str:
-        # Entfernt Namespace-Prefixe
         return tag.split("}")[-1]
 
     urls: list[str] = []
 
-    if localname(root.tag) == "sitemapindex":
-        for sm_el in root:
-            if localname(sm_el.tag) != "sitemap":
+    tag = localname(root.tag)
+    if tag == "sitemapindex":
+        for sm in root:
+            if localname(sm.tag) != "sitemap":
                 continue
-            loc_el = None
-            for child in sm_el:
-                if localname(child.tag) == "loc":
-                    loc_el = child
-                    break
+            loc_el = next((c for c in sm if localname(c.tag) == "loc"), None)
             if loc_el is not None and loc_el.text:
-                sub_url = loc_el.text.strip()
-                urls.extend(parse_sitemap(sub_url))
+                sub = loc_el.text.strip()
+                urls.extend(parse_sitemap(sub))
         return urls
 
-    if localname(root.tag) == "urlset":
-        for url_el in root:
-            if localname(url_el.tag) != "url":
+    if tag == "urlset":
+        for u in root:
+            if localname(u.tag) != "url":
                 continue
-            loc_el = None
-            for child in url_el:
-                if localname(child.tag) == "loc":
-                    loc_el = child
-                    break
+            loc_el = next((c for c in u if localname(c.tag) == "loc"), None)
             if loc_el is not None and loc_el.text:
-                loc = loc_el.text.strip()
-                urls.append(loc)
+                urls.append(loc_el.text.strip())
 
-    # Falls Struktur anders ist, suche generisch nach allen <loc>-Elementen
+    # Generischer Fallback: sammle alle <loc>
     if not urls:
         for el in root.iter():
             if localname(el.tag) == "loc" and el.text:
@@ -155,29 +139,23 @@ def parse_sitemap(url: str) -> list[str]:
     return urls
 
 
-def discover_pages_from_sitemap() -> tuple[list[str], list[str]]:
+def select_relevant_urls(all_urls: list[str]) -> list[str]:
     """
-    Entdeckt Release-Notes- und What's-New-Seiten aus der Sitemap.
-    Gibt zwei Listen zurück: (release_pages, whats_new_pages)
+    Filtert die aus der Sitemap gewonnenen URLs auf relevante Seiten:
+    - Domain help.zscaler.com
+    - Enthalten Hinweise auf Release-Notes oder What's New
+    - Schließt offensichtliche Nicht-Artikel aus
     """
-    all_urls = parse_sitemap(SITEMAP_URL)
-    release_pages: set[str] = set()
-    whats_new_pages: set[str] = set()
-
+    relevant: set[str] = set()
     for u in all_urls:
         if not is_help_domain(u):
             continue
-        path = urlparse(u).path
-        for patt in RELEASE_PAGE_PATTERNS:
-            if patt.search(path):
-                release_pages.add(u)
-                break
-        for patt in WHATS_NEW_PATTERNS:
-            if patt.search(path):
-                whats_new_pages.add(u)
-                break
-
-    return sorted(release_pages), sorted(whats_new_pages)
+        path = urlparse(u).path.lower()
+        if any(excl in path for excl in URL_EXCLUDE_HINTS):
+            continue
+        if any(hint in path for hint in URL_INCLUDE_HINTS):
+            relevant.add(u)
+    return sorted(relevant)
 
 
 def normalize_date(date_text: str | None) -> datetime:
@@ -216,9 +194,8 @@ def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
         if txt:
             return normalize_date(txt)
 
-    # 3) Heuristik
-    candidates = soup.select("*")
-    for c in candidates:
+    # 3) Sichtbare Datumstexte
+    for c in soup.select("*"):
         t = c.get_text(" ", strip=True)
         tl = t.lower()
         if any(k in tl for k in ["published", "updated", "release", "date", "released", "last updated"]):
@@ -226,76 +203,18 @@ def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
             if m:
                 return normalize_date(m.group(1))
 
+    # Fallback: jetzt
     return datetime.now(timezone.utc)
 
 
-def extract_articles_from_page(url: str) -> list[dict]:
-    """
-    Extrahiert Artikel/Einträge von einer Indexseite (Release Notes oder What's New).
-    """
-    try:
-        html = fetch(url)
-    except Exception as e:
-        print(f"[WARN] Seite nicht abrufbar: {url} -> {e}")
-        return []
-
-    soup = BeautifulSoup(html, "html.parser")
-    items: list[dict] = []
-
-    for a in soup.select("a[href]"):
-        href = a.get("href")
-        if not href:
-            continue
-        link = urljoin(BASE, href) if href.startswith("/") else href
-        if not is_help_domain(link):
-            continue
-
-        title = a.get_text(strip=True)
-        if not title or len(title) < 5:
-            continue
-
-        url_l = link.lower()
-        if any(h in url_l for h in ARTICLE_URL_HINTS):
-            items.append({"title": title, "link": link})
-
-    # Dedup
-    seen = set()
-    clean: list[dict] = []
-    for it in items:
-        if it["link"] in seen:
-            continue
-        seen.add(it["link"])
-        path = urlparse(it["link"]).path
-        if path.strip("/"):
-            clean.append(it)
-
-    # Anreichern mit Datum
-    enriched: list[dict] = []
-    for it in clean:
-        try:
-            art_html = fetch(it["link"])
-            art_soup = BeautifulSoup(art_html, "html.parser")
-            published = extract_date_from_soup(art_soup)
-        except Exception:
-            published = datetime.now(timezone.utc)
-        enriched.append({
-            "title": it["title"],
-            "link": it["link"],
-            "published": published,
-            "source_page": url
-        })
-
-    # Fallback: wenn keine Unterartikel gefunden, nimm die Seite selbst
-    if not enriched:
-        published = extract_date_from_soup(soup)
-        enriched.append({
-            "title": soup.title.get_text(strip=True) if soup.title else url,
-            "link": url,
-            "published": published,
-            "source_page": url
-        })
-
-    return enriched
+def extract_title(soup: BeautifulSoup, default: str) -> str:
+    # Bevorzugt H1, sonst <title>, sonst Fallback
+    h1 = soup.find("h1")
+    if h1 and h1.get_text(strip=True):
+        return h1.get_text(strip=True)
+    if soup.title and soup.title.get_text(strip=True):
+        return soup.title.get_text(strip=True)
+    return default
 
 
 def build_feed(items: list[dict]) -> bytes:
@@ -316,7 +235,6 @@ def build_feed(items: list[dict]) -> bytes:
         fe.published(it["published"])
         fe.updated(it["published"])
         fe.summary(f"{it['title']} – Quelle: {it['source_page']}")
-
     return fg.rss_str(pretty=True)
 
 
@@ -326,56 +244,52 @@ def main():
     BACKFILL_DAYS = int(os.getenv("BACKFILL_DAYS", "14"))
     cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
 
-    release_pages, whats_new_pages = discover_pages_from_sitemap()
-    print(f"[INFO] Release-Notes-Seiten gefunden: {len(release_pages)}")
-    print(f"[INFO] What's-New-Seiten gefunden: {len(whats_new_pages)}")
+    # 1) Vollständige Sitemap einlesen
+    all_urls = parse_sitemap(SITEMAP_URL)
+    print(f"[INFO] Gesamt-URLs aus Sitemap: {len(all_urls)}")
 
-    # Fallback, falls die Sitemap keine Seiten liefert
-    if not release_pages and not whats_new_pages:
-        print(f"[WARN] Keine Seiten aus Sitemap gefunden, nutze Fallback-Quellen.")
-        release_pages = []
-        whats_new_pages = []
-        for src in FALLBACK_SOURCES:
-            # zuordnen: Release vs What's New
-            if "whats-new" in src:
-                whats_new_pages.append(src)
-            else:
-                release_pages.append(src)
+    # 2) Relevante Seiten auswählen (Release Notes & What's New)
+    candidates = select_relevant_urls(all_urls)
+    print(f"[INFO] Relevante Seiten nach Filter: {len(candidates)}")
+    for c in candidates[:15]:
+        print(f" - {c}")
+    if len(candidates) > 15:
+        print(f" ... ({len(candidates) - 15} weitere)")
 
+    # 3) Jede Kandidaten-Seite abrufen und Metadaten extrahieren
     aggregated: list[dict] = []
-
-    # Release-Notes
-    for page_url in release_pages:
+    for url in candidates:
         try:
-            items = extract_articles_from_page(page_url)
-            aggregated.extend(items)
-            time.sleep(0.5)
+            html = fetch(url)
+            soup = BeautifulSoup(html, "html.parser")
+            title = extract_title(soup, default=url)
+            published = extract_date_from_soup(soup)
+            aggregated.append({
+                "title": title,
+                "link": url,
+                "published": published,
+                "source_page": url
+            })
+            time.sleep(FETCH_DELAY_SEC)
         except Exception as e:
-            print(f"[WARN] Fehler beim Extrahieren (Release): {page_url} -> {e}")
+            print(f"[WARN] Fehler beim Abruf: {url} -> {e}")
 
-    # What's New
-    for page_url in whats_new_pages:
-        try:
-            items = extract_articles_from_page(page_url)
-            aggregated.extend(items)
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"[WARN] Fehler beim Extrahieren (Whats New): {page_url} -> {e}")
+    print(f"[INFO] Extrahierte Seiten gesamt: {len(aggregated)}")
 
-    # Zeitfenster
+    # 4) Zeitfenster anwenden
     window_items = [it for it in aggregated if it["published"] >= cutoff]
-    print(f"[INFO] Items gesamt: {len(aggregated)}, innerhalb {BACKFILL_DAYS} Tage: {len(window_items)}")
+    print(f"[INFO] Innerhalb der letzten {BACKFILL_DAYS} Tage: {len(window_items)}")
 
-    # Deduplizieren
+    # 5) Dedup nach Link
     final: list[dict] = []
-    seen_links = set()
+    seen = set()
     for it in window_items:
-        if it["link"] in seen_links:
+        if it["link"] in seen:
             continue
-        seen_links.add(it["link"])
+        seen.add(it["link"])
         final.append(it)
 
-    # RSS schreiben
+    # 6) RSS bauen und schreiben
     rss_xml = build_feed(final)
     with open(OUTPUT_PATH, "wb") as f:
         f.write(rss_xml)
