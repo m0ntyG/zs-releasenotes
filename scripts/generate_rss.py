@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
+"""
+Zscaler Help Releases RSS Generator
+
+- Crawlt automatisch help.zscaler.com über die Sitemap, findet alle Release-Notes-Seiten
+  (inkl. neuer Produkte) und extrahiert Artikel/Einträge.
+- Baut einen RSS-Feed und schreibt ihn nach ./public/rss.xml.
+- Optionales Zeitfenster über BACKFILL_DAYS (Standard: 14 Tage).
+
+Voraussetzungen:
+  pip install requests beautifulsoup4 feedgen python-dateutil lxml
+"""
+
 import os
 import re
 import time
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree as ET
 from bs4 import BeautifulSoup
@@ -25,15 +37,18 @@ RELEASE_PAGE_PATTERNS = [
 ]
 ARTICLE_URL_HINTS = ["release", "notes", "whats-new", "what's-new", "new"]
 
-def fetch(url, timeout=30):
+
+def fetch(url: str, timeout: int = 30) -> str:
     r = requests.get(url, headers=HEADERS, timeout=timeout)
     r.raise_for_status()
     return r.text
 
-def fetch_bytes(url, timeout=30):
+
+def fetch_bytes(url: str, timeout: int = 30) -> bytes:
     r = requests.get(url, headers=HEADERS, timeout=timeout)
     r.raise_for_status()
     return r.content
+
 
 def is_help_domain(url: str) -> bool:
     try:
@@ -42,7 +57,8 @@ def is_help_domain(url: str) -> bool:
     except Exception:
         return False
 
-def parse_sitemap(url: str) -> list:
+
+def parse_sitemap(url: str) -> list[str]:
     """
     Lädt sitemap.xml oder eine Sub-Sitemap. Unterstützt sitemapindex mit rekursiver Auflösung.
     Liefert alle <loc>-URLs zurück.
@@ -60,7 +76,7 @@ def parse_sitemap(url: str) -> list:
         return []
 
     ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-    urls = []
+    urls: list[str] = []
 
     # Prüfe, ob sitemapindex
     if root.tag.endswith("sitemapindex"):
@@ -80,12 +96,13 @@ def parse_sitemap(url: str) -> list:
 
     return urls
 
-def discover_release_pages_from_sitemap() -> list:
+
+def discover_release_pages_from_sitemap() -> list[str]:
     """
     Entdeckt alle Release-Notes-Seiten über die Sitemap automatisch.
     """
     all_urls = parse_sitemap(SITEMAP_URL)
-    release_pages = set()
+    release_pages: set[str] = set()
     for u in all_urls:
         if not is_help_domain(u):
             continue
@@ -95,6 +112,7 @@ def discover_release_pages_from_sitemap() -> list:
                 release_pages.add(u)
                 break
     return sorted(release_pages)
+
 
 def normalize_date(date_text: str | None) -> datetime:
     if not date_text:
@@ -108,6 +126,7 @@ def normalize_date(date_text: str | None) -> datetime:
         return dt.astimezone(timezone.utc)
     except Exception:
         return datetime.now(timezone.utc)
+
 
 def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
     # 1) Versuche strukturierte Metadaten
@@ -125,7 +144,6 @@ def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
     # 2) time-Tag
     time_el = soup.find("time")
     if time_el:
-        # title- oder datetime-Attr
         if time_el.get("datetime"):
             return normalize_date(time_el.get("datetime"))
         txt = time_el.get_text(strip=True)
@@ -145,7 +163,8 @@ def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
     # Fallback: jetzt
     return datetime.now(timezone.utc)
 
-def extract_articles_from_release_page(url: str) -> list:
+
+def extract_articles_from_release_page(url: str) -> list[dict]:
     """
     Extrahiert Einzelartikel/Einträge aus einer Release-Notes-Seite.
     Greift auf gängige Link-Pattern zurück und dedupliziert.
@@ -157,7 +176,7 @@ def extract_articles_from_release_page(url: str) -> list:
         return []
 
     soup = BeautifulSoup(html, "html.parser")
-    items = []
+    items: list[dict] = []
 
     # Kandidaten-Links innerhalb des Inhalts
     for a in soup.select("a[href]"):
@@ -189,19 +208,18 @@ def extract_articles_from_release_page(url: str) -> list:
 
     # Deduplizieren nach Link und grob filtern:
     seen = set()
-    clean = []
+    clean: list[dict] = []
     for it in items:
         link = it["link"]
         if link in seen:
             continue
         seen.add(link)
-        # Nicht auf Indexseiten zurückverweisen, möglichst artikelartige URLs
         path = urlparse(link).path
         if path.strip("/"):
             clean.append(it)
 
     # Für jeden Artikel das Datum bestimmen
-    enriched = []
+    enriched: list[dict] = []
     for it in clean:
         try:
             art_html = fetch(it["link"])
@@ -228,7 +246,8 @@ def extract_articles_from_release_page(url: str) -> list:
 
     return enriched
 
-def build_feed(items: list) -> bytes:
+
+def build_feed(items: list[dict]) -> bytes:
     fg = FeedGenerator()
     fg.id(BASE)
     fg.title("Zscaler Releases (help.zscaler.com)")
@@ -245,13 +264,17 @@ def build_feed(items: list) -> bytes:
         fe.link(href=it["link"])
         fe.published(it["published"])
         fe.updated(it["published"])
-        # Kurze Summary inkl. Quelle
         fe.summary(f"{it['title']} – Quelle: {it['source_page']}")
 
     return fg.rss_str(pretty=True)
 
+
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # Anzahl Tage, die in die Vergangenheit berücksichtigt werden (Standard: 14)
+    BACKFILL_DAYS = int(os.getenv("BACKFILL_DAYS", "14"))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
 
     # 1) Release-Notes-Seiten automatisch über Sitemap finden
     release_pages = discover_release_pages_from_sitemap()
@@ -262,7 +285,7 @@ def main():
         print(f" ... ({len(release_pages)-10} weitere)")
 
     # 2) Artikel aus allen Release-Notes-Seiten extrahieren
-    aggregated = []
+    aggregated: list[dict] = []
     for page_url in release_pages:
         try:
             items = extract_articles_from_release_page(page_url)
@@ -271,20 +294,25 @@ def main():
         except Exception as e:
             print(f"[WARN] Fehler beim Extrahieren: {page_url} -> {e}")
 
-    # 3) Final deduplizieren
-    final = []
+    # 3) Nach Zeitfenster filtern (nur letzte BACKFILL_DAYS)
+    window_items = [it for it in aggregated if it["published"] >= cutoff]
+    print(f"[INFO] Gefundene Items gesamt: {len(aggregated)}, innerhalb {BACKFILL_DAYS} Tage: {len(window_items)}")
+
+    # 4) Final deduplizieren
+    final: list[dict] = []
     seen_links = set()
-    for it in aggregated:
+    for it in window_items:
         if it["link"] in seen_links:
             continue
         seen_links.add(it["link"])
         final.append(it)
 
-    # 4) RSS bauen und schreiben
+    # 5) RSS bauen und schreiben
     rss_xml = build_feed(final)
     with open(OUTPUT_PATH, "wb") as f:
         f.write(rss_xml)
     print(f"[INFO] RSS geschrieben: {OUTPUT_PATH}")
+
 
 if __name__ == "__main__":
     main()
