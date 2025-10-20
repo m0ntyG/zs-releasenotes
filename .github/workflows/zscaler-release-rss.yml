@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      BACKFILL_DAYS: "14"    # Zeitfenster: 14 Tage
+      BACKFILL_DAYS: "30"    # Zeitfenster: 14 Tage
     steps:
       - name: Checkout
         uses: actions/checkout@v4
