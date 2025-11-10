@@ -1,9 +1,9 @@
 name: Zscaler Help Releases RSS
 
-on:
-  schedule:
-    - cron: "*/30 * * * *"
-  workflow_dispatch:
+#on:
+#  schedule:
+#    - cron: "*/30 * * * *"
+#  workflow_dispatch:
 
 permissions:
   contents: write
