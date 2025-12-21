@@ -19,7 +19,7 @@ import gzip
 import time
 import requests
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Set
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree as ET
 from bs4 import BeautifulSoup
@@ -150,7 +150,7 @@ def select_relevant_urls(all_urls: List[str]) -> List[str]:
     - Contains hints for Release Notes or What's New
     - Excludes obvious non-articles
     """
-    relevant: set = set()
+    relevant: Set[str] = set()
     for u in all_urls:
         if not is_help_domain(u):
             continue
@@ -212,11 +212,15 @@ def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
         if txt:
             return normalize_date(txt)
 
-    # 3) Visible date texts
+    # 3) Visible date texts with explicit 4-digit year requirement
     for c in soup.select("*"):
         t = c.get_text(" ", strip=True)
         tl = t.lower()
         if any(k in tl for k in ["published", "updated", "release", "date", "released", "last updated"]):
+            # Match date patterns that include 4-digit years:
+            # - "31 December 2024" (day month year)
+            # - "December 31, 2024" (month day, year)
+            # - "2024-12-31" (ISO format)
             m = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\w+\s+\d{1,2},\s*\d{4}|\d{4}-\d{2}-\d{2})", t)
             if m:
                 return normalize_date(m.group(1))
