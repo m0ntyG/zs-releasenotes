@@ -64,6 +64,12 @@ RSS_PATHS = [
     "/atom.xml",
 ]
 
+# RSS MIME types to check
+RSS_MIME_TYPES = ['xml', 'rss', 'atom']
+
+# Maximum number of section pages to check for RSS links
+MAX_SECTION_PAGES_TO_CHECK = 10
+
 
 def fetch(url: str, timeout: int = 30) -> str:
     r = requests.get(url, headers=HEADERS, timeout=timeout)
@@ -168,30 +174,38 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
     """
     discovered_feeds: Set[str] = set()
     
-    # 1. Check common RSS paths at base URL
-    print(f"[INFO] Checking for RSS feeds at base URL...")
-    for rss_path in RSS_PATHS:
-        rss_url = urljoin(base_url, rss_path)
+    def check_rss_url(rss_url: str) -> bool:
+        """
+        Helper function to check if a URL is a valid RSS feed.
+        Returns True if the URL is a valid RSS/Atom feed.
+        """
         try:
             response = requests.head(rss_url, headers=HEADERS, timeout=10, allow_redirects=True)
             if response.status_code == 200:
                 # Verify it's actually an RSS/XML feed
                 content_type = response.headers.get('content-type', '').lower()
-                if 'xml' in content_type or 'rss' in content_type or 'atom' in content_type:
-                    discovered_feeds.add(rss_url)
-                    print(f"[INFO] Found RSS feed: {rss_url}")
+                if any(mime_type in content_type for mime_type in RSS_MIME_TYPES):
+                    return True
                 else:
                     # Try GET to check content
                     try:
                         content = fetch(rss_url)
                         if '<rss' in content.lower() or '<feed' in content.lower():
-                            discovered_feeds.add(rss_url)
-                            print(f"[INFO] Found RSS feed: {rss_url}")
-                    except:
+                            return True
+                    except Exception:
                         pass
             time.sleep(FETCH_DELAY_SEC)
-        except Exception as e:
+        except Exception:
             pass
+        return False
+    
+    # 1. Check common RSS paths at base URL
+    print(f"[INFO] Checking for RSS feeds at base URL...")
+    for rss_path in RSS_PATHS:
+        rss_url = urljoin(base_url, rss_path)
+        if check_rss_url(rss_url):
+            discovered_feeds.add(rss_url)
+            print(f"[INFO] Found RSS feed: {rss_url}")
     
     # 2. Extract unique path prefixes from sitemap URLs
     # These represent different product sections (e.g., /zia/, /zpa/, /zdx/, etc.)
@@ -213,29 +227,13 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
     for prefix in sorted(path_prefixes):
         for rss_path in RSS_PATHS:
             rss_url = urljoin(base_url, prefix + rss_path)
-            try:
-                response = requests.head(rss_url, headers=HEADERS, timeout=10, allow_redirects=True)
-                if response.status_code == 200:
-                    content_type = response.headers.get('content-type', '').lower()
-                    if 'xml' in content_type or 'rss' in content_type or 'atom' in content_type:
-                        discovered_feeds.add(rss_url)
-                        print(f"[INFO] Found RSS feed: {rss_url}")
-                    else:
-                        # Try GET to check content
-                        try:
-                            content = fetch(rss_url)
-                            if '<rss' in content.lower() or '<feed' in content.lower():
-                                discovered_feeds.add(rss_url)
-                                print(f"[INFO] Found RSS feed: {rss_url}")
-                        except:
-                            pass
-                time.sleep(FETCH_DELAY_SEC)
-            except Exception as e:
-                pass
+            if check_rss_url(rss_url):
+                discovered_feeds.add(rss_url)
+                print(f"[INFO] Found RSS feed: {rss_url}")
     
     # 4. Look for RSS feed links in the main help page and key pages
     key_pages = [base_url]
-    for prefix in list(path_prefixes)[:10]:  # Check first 10 section pages
+    for prefix in list(path_prefixes)[:MAX_SECTION_PAGES_TO_CHECK]:
         key_pages.append(urljoin(base_url, prefix))
     
     for page_url in key_pages:
@@ -278,7 +276,18 @@ def parse_rss_feed(feed_url: str) -> List[Dict]:
     
     try:
         content = fetch(feed_url)
-        root = ET.fromstring(content.encode('utf-8') if isinstance(content, str) else content)
+        
+        # Validate content is XML before parsing
+        if not content or not isinstance(content, str):
+            print(f"[WARN] Invalid content type from {feed_url}")
+            return items
+        
+        # Check if content looks like XML
+        if not ('<rss' in content.lower() or '<feed' in content.lower() or '<?xml' in content.lower()):
+            print(f"[WARN] Content from {feed_url} doesn't appear to be XML/RSS")
+            return items
+        
+        root = ET.fromstring(content.encode('utf-8'))
         
         def localname(tag: str) -> str:
             return tag.split("}")[-1]
