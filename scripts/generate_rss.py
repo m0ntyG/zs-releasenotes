@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Zscaler Help Releases RSS Generator (vollständige Sitemap-Nutzung)
+Zscaler Help Releases RSS Generator
 
-- Nutzt die komplette Sitemap (inkl. Sub-Sitemaps und .xml.gz) von help.zscaler.com.
-- Filtert alle relevanten Seiten (Release Notes & What's New) direkt aus der Sitemap.
-- Extrahiert Titel & Veröffentlichungsdatum je Seite und erstellt einen RSS-Feed.
-- Beschränkt den Feed optional mit BACKFILL_DAYS (Standard: 14, z. B. 90).
+This script collects Zscaler release notes from help.zscaler.com by:
+- Using the complete sitemap (including sub-sitemaps and .xml.gz files)
+- Filtering relevant pages (Release Notes & What's New) directly from the sitemap
+- Extracting title & publication date from each page and creating an RSS feed
+- Optionally limiting the feed with BACKFILL_DAYS (default: 14, e.g., 90)
 
-Voraussetzungen:
+Requirements:
   pip install requests beautifulsoup4 feedgen python-dateutil lxml
 """
 
@@ -18,6 +19,7 @@ import gzip
 import time
 import requests
 from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree as ET
 from bs4 import BeautifulSoup
@@ -33,22 +35,22 @@ HEADERS = {
 OUTPUT_DIR = os.path.join(os.getcwd(), "public")
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "rss.xml")
 
-# Relevanz-Hinweise für Seiten aus der Sitemap
-# Wir berücksichtigen gezielt Release-Notes- und What's-New-Pfade.
+# Relevance hints for pages from the sitemap
+# We specifically consider Release Notes and What's New paths.
 URL_INCLUDE_HINTS = [
-    "release-notes",        # typische Pfade für Release Notes
-    "whats-new",            # What's New Übersicht
-    "what's-new",           # alternative Schreibweise
+    "release-notes",        # typical paths for Release Notes
+    "whats-new",            # What's New overview
+    "what's-new",           # alternative spelling
 ]
-# Optional: zusätzliche Hinweise, aber mit Vorsicht (zu breit bedeutet Rauschen)
+# Optional: additional hints, but use with caution (too broad means noise)
 # URL_INCLUDE_HINTS += ["release", "notes"]
 
-# Ausschlussmuster (um offensichtliche Nicht-Artikel zu vermeiden)
+# Exclusion patterns (to avoid obvious non-articles)
 URL_EXCLUDE_HINTS = [
     "/tag/", "/taxonomy/", "/author/", "/search", "/attachment", "/node/",
 ]
 
-# Minimal-Pause zwischen Abrufen (freundliches Crawling)
+# Minimal pause between fetches (polite crawling)
 FETCH_DELAY_SEC = 0.3
 
 
@@ -65,18 +67,20 @@ def fetch_bytes(url: str, timeout: int = 30) -> bytes:
 
 
 def maybe_decompress_sitemap(url: str, content: bytes) -> bytes:
-    # Entpacken, wenn URL .gz endet oder der Content tatsächlich gzipped ist
+    """
+    Decompress if URL ends with .gz or content is actually gzipped.
+    """
     try:
-        # Wenn es nach gzip aussieht, versuche zu entpacken
+        # If it looks like gzip, try to decompress
         if url.lower().endswith(".gz"):
             with gzip.GzipFile(fileobj=io.BytesIO(content)) as gz:
                 return gz.read()
-        # Einige Server senden ungekennzeichnete gzip-Daten; heuristischer Versuch
+        # Some servers send unmarked gzip data; heuristic attempt
         if content[:2] == b"\x1f\x8b":
             with gzip.GzipFile(fileobj=io.BytesIO(content)) as gz:
                 return gz.read()
     except Exception as e:
-        print(f"[WARN] Gzip-Entpackung fehlgeschlagen für {url}: {e}")
+        print(f"[WARN] Gzip decompression failed for {url}: {e}")
     return content
 
 
@@ -88,28 +92,28 @@ def is_help_domain(url: str) -> bool:
         return False
 
 
-def parse_sitemap(url: str) -> list[str]:
+def parse_sitemap(url: str) -> List[str]:
     """
-    Lädt sitemap.xml oder eine Sub-Sitemap. Unterstützt sitemapindex rekursiv und .xml.gz.
-    Gibt eine flache Liste aller <loc>-URLs zurück.
+    Loads sitemap.xml or a sub-sitemap. Supports sitemapindex recursively and .xml.gz.
+    Returns a flat list of all <loc> URLs.
     """
     try:
         raw = fetch_bytes(url)
         content = maybe_decompress_sitemap(url, raw)
     except Exception as e:
-        print(f"[WARN] Sitemap abrufen fehlgeschlagen: {url} -> {e}")
+        print(f"[WARN] Failed to fetch sitemap: {url} -> {e}")
         return []
 
     try:
         root = ET.fromstring(content)
     except Exception as e:
-        print(f"[WARN] Sitemap XML-Parsing fehlgeschlagen: {url} -> {e}")
+        print(f"[WARN] Failed to parse sitemap XML: {url} -> {e}")
         return []
 
     def localname(tag: str) -> str:
         return tag.split("}")[-1]
 
-    urls: list[str] = []
+    urls: List[str] = []
 
     tag = localname(root.tag)
     if tag == "sitemapindex":
@@ -130,7 +134,7 @@ def parse_sitemap(url: str) -> list[str]:
             if loc_el is not None and loc_el.text:
                 urls.append(loc_el.text.strip())
 
-    # Generischer Fallback: sammle alle <loc>
+    # Generic fallback: collect all <loc>
     if not urls:
         for el in root.iter():
             if localname(el.tag) == "loc" and el.text:
@@ -139,14 +143,14 @@ def parse_sitemap(url: str) -> list[str]:
     return urls
 
 
-def select_relevant_urls(all_urls: list[str]) -> list[str]:
+def select_relevant_urls(all_urls: List[str]) -> List[str]:
     """
-    Filtert die aus der Sitemap gewonnenen URLs auf relevante Seiten:
+    Filters URLs from the sitemap to relevant pages:
     - Domain help.zscaler.com
-    - Enthalten Hinweise auf Release-Notes oder What's New
-    - Schließt offensichtliche Nicht-Artikel aus
+    - Contains hints for Release Notes or What's New
+    - Excludes obvious non-articles
     """
-    relevant: set[str] = set()
+    relevant: set = set()
     for u in all_urls:
         if not is_help_domain(u):
             continue
@@ -158,7 +162,12 @@ def select_relevant_urls(all_urls: list[str]) -> list[str]:
     return sorted(relevant)
 
 
-def normalize_date(date_text: str | None) -> datetime:
+def normalize_date(date_text: Optional[str]) -> datetime:
+    """
+    Parse date string and normalize to UTC timezone.
+    Returns current UTC time if parsing fails.
+    Handles year transitions robustly by always using explicit year in parsed dates.
+    """
     if not date_text:
         return datetime.now(timezone.utc)
     try:
@@ -173,7 +182,16 @@ def normalize_date(date_text: str | None) -> datetime:
 
 
 def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
-    # 1) strukturierte Metadaten
+    """
+    Extract publication date from HTML page.
+    Tries multiple strategies:
+    1. Structured metadata (meta tags)
+    2. HTML5 time element
+    3. Visible date text
+    
+    Returns current UTC time as fallback.
+    """
+    # 1) Structured metadata
     meta_selectors = [
         ('meta[property="article:published_time"]', "content"),
         ('meta[name="article:published_time"]', "content"),
@@ -185,7 +203,7 @@ def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
         if el and el.get(attr):
             return normalize_date(el.get(attr))
 
-    # 2) time-Tag
+    # 2) time tag
     time_el = soup.find("time")
     if time_el:
         if time_el.get("datetime"):
@@ -194,7 +212,7 @@ def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
         if txt:
             return normalize_date(txt)
 
-    # 3) Sichtbare Datumstexte
+    # 3) Visible date texts
     for c in soup.select("*"):
         t = c.get_text(" ", strip=True)
         tl = t.lower()
@@ -203,12 +221,15 @@ def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
             if m:
                 return normalize_date(m.group(1))
 
-    # Fallback: jetzt
+    # Fallback: now
     return datetime.now(timezone.utc)
 
 
 def extract_title(soup: BeautifulSoup, default: str) -> str:
-    # Bevorzugt H1, sonst <title>, sonst Fallback
+    """
+    Extract page title from HTML.
+    Prefers H1, then <title>, then fallback.
+    """
     h1 = soup.find("h1")
     if h1 and h1.get_text(strip=True):
         return h1.get_text(strip=True)
@@ -217,14 +238,18 @@ def extract_title(soup: BeautifulSoup, default: str) -> str:
     return default
 
 
-def build_feed(items: list[dict]) -> bytes:
+def build_feed(items: List[Dict]) -> bytes:
+    """
+    Build RSS feed from list of items.
+    Each item should have: title, link, published, source_page
+    """
     fg = FeedGenerator()
     fg.id(BASE)
     fg.title("Zscaler Releases (help.zscaler.com)")
     fg.link(href=BASE, rel='alternate')
     fg.link(href=urljoin(BASE, "/rss.xml"), rel='self')
-    fg.description("Automatisch generierter Feed für neue Zscaler Release Notes über alle Produkte.")
-    fg.language('de')
+    fg.description("Automatically generated feed for new Zscaler Release Notes across all products.")
+    fg.language('en')
 
     items_sorted = sorted(items, key=lambda x: x["published"], reverse=True)
     for it in items_sorted:
@@ -234,30 +259,41 @@ def build_feed(items: list[dict]) -> bytes:
         fe.link(href=it["link"])
         fe.published(it["published"])
         fe.updated(it["published"])
-        fe.summary(f"{it['title']} – Quelle: {it['source_page']}")
+        fe.summary(f"{it['title']} – Source: {it['source_page']}")
     return fg.rss_str(pretty=True)
 
 
 def main():
+    """
+    Main function to generate RSS feed.
+    
+    Process:
+    1. Read complete sitemap
+    2. Select relevant pages (Release Notes & What's New)
+    3. Fetch each candidate page and extract metadata
+    4. Apply time window filter (BACKFILL_DAYS)
+    5. Deduplicate by link
+    6. Build and write RSS feed
+    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     BACKFILL_DAYS = int(os.getenv("BACKFILL_DAYS", "14"))
     cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
 
-    # 1) Vollständige Sitemap einlesen
+    # 1) Read complete sitemap
     all_urls = parse_sitemap(SITEMAP_URL)
-    print(f"[INFO] Gesamt-URLs aus Sitemap: {len(all_urls)}")
+    print(f"[INFO] Total URLs from sitemap: {len(all_urls)}")
 
-    # 2) Relevante Seiten auswählen (Release Notes & What's New)
+    # 2) Select relevant pages (Release Notes & What's New)
     candidates = select_relevant_urls(all_urls)
-    print(f"[INFO] Relevante Seiten nach Filter: {len(candidates)}")
+    print(f"[INFO] Relevant pages after filter: {len(candidates)}")
     for c in candidates[:15]:
         print(f" - {c}")
     if len(candidates) > 15:
-        print(f" ... ({len(candidates) - 15} weitere)")
+        print(f" ... ({len(candidates) - 15} more)")
 
-    # 3) Jede Kandidaten-Seite abrufen und Metadaten extrahieren
-    aggregated: list[dict] = []
+    # 3) Fetch each candidate page and extract metadata
+    aggregated: List[Dict] = []
     for url in candidates:
         try:
             html = fetch(url)
@@ -272,16 +308,16 @@ def main():
             })
             time.sleep(FETCH_DELAY_SEC)
         except Exception as e:
-            print(f"[WARN] Fehler beim Abruf: {url} -> {e}")
+            print(f"[WARN] Error fetching: {url} -> {e}")
 
-    print(f"[INFO] Extrahierte Seiten gesamt: {len(aggregated)}")
+    print(f"[INFO] Total extracted pages: {len(aggregated)}")
 
-    # 4) Zeitfenster anwenden
+    # 4) Apply time window
     window_items = [it for it in aggregated if it["published"] >= cutoff]
-    print(f"[INFO] Innerhalb der letzten {BACKFILL_DAYS} Tage: {len(window_items)}")
+    print(f"[INFO] Within last {BACKFILL_DAYS} days: {len(window_items)}")
 
-    # 5) Dedup nach Link
-    final: list[dict] = []
+    # 5) Deduplicate by link
+    final: List[Dict] = []
     seen = set()
     for it in window_items:
         if it["link"] in seen:
@@ -289,11 +325,11 @@ def main():
         seen.add(it["link"])
         final.append(it)
 
-    # 6) RSS bauen und schreiben
+    # 6) Build and write RSS
     rss_xml = build_feed(final)
     with open(OUTPUT_PATH, "wb") as f:
         f.write(rss_xml)
-    print(f"[INFO] RSS geschrieben: {OUTPUT_PATH}")
+    print(f"[INFO] RSS written: {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":

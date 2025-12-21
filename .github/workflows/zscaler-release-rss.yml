@@ -1,9 +1,10 @@
 name: Zscaler Help Releases RSS
 
-#on:
-#  schedule:
-#    - cron: "*/30 * * * *"
-#  workflow_dispatch:
+on:
+  schedule:
+    # Run twice a day: at 6 AM and 6 PM UTC
+    - cron: "0 6,18 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      BACKFILL_DAYS: "90"    # Zeitfenster: 14 Tage
+      BACKFILL_DAYS: "90"    # Time window: 90 days
     steps:
       - name: Checkout
         uses: actions/checkout@v4
