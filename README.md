@@ -105,17 +105,74 @@ The generated RSS feed includes:
 - **Title**: Zscaler Releases (help.zscaler.com)
 - **Description**: Automatically generated feed for new Zscaler Release Notes across all products
 - **Language**: English
-- **Items**: Release notes from the last 90 days (configurable)
+- **Items**: Aggregated from all discovered RSS feeds and/or scraped pages
+- **Time Window**: Release notes from the last 90 days (configurable)
 - **Sorting**: Latest releases first
+- **Deduplication**: Duplicate entries are automatically removed
+
+## RSS Feed Discovery
+
+The script discovers RSS feeds through multiple strategies:
+
+1. **Base URL Check**: Tests common RSS paths (`/rss`, `/feed`, `/rss.xml`, etc.) at base URL
+2. **Section Discovery**: Extracts product sections from sitemap (e.g., `/zia/`, `/zpa/`, `/zdx/`)
+3. **Section RSS Feeds**: Checks for RSS feeds at each discovered section path
+4. **HTML Link Tags**: Parses pages for RSS feed links in `<link>` tags
+5. **Anchor Links**: Searches for RSS feed links in page content
+
+This approach ensures:
+- **Comprehensive Coverage**: All product sections are included
+- **Future-Proof**: New sections are automatically discovered
+- **Resilient**: Falls back to page scraping if RSS feeds are unavailable
 
 ## Contributing
 
-When making changes to the date parsing logic, ensure:
+When making changes, ensure:
 
-1. All date patterns require 4-digit years
-2. Dates are timezone-aware (UTC)
-3. The BACKFILL_DAYS calculation handles year transitions correctly
-4. Run tests across year boundaries (e.g., December 31 to January 1)
+1. RSS feed discovery logic handles both RSS 2.0 and Atom formats
+2. All date patterns require 4-digit years for robust year handling
+3. Dates are timezone-aware (UTC)
+4. The BACKFILL_DAYS calculation handles year transitions correctly
+5. New RSS feed discovery strategies are added to `discover_rss_feeds()`
+6. The fallback page scraping remains functional
+7. Run tests across year boundaries (e.g., December 31 to January 1)
+
+## Technical Details
+
+### RSS Feed Discovery Process
+
+The `discover_rss_feeds()` function implements a comprehensive discovery strategy:
+
+```python
+# 1. Check base URL
+for path in ['/rss', '/feed', '/rss.xml', '/feed.xml', '/atom.xml']:
+    check(BASE + path)
+
+# 2. Extract sections from sitemap URLs
+sections = extract_path_prefixes(sitemap_urls)  # e.g., /zia, /zpa, /zdx
+
+# 3. Check each section for RSS feeds
+for section in sections:
+    for path in RSS_PATHS:
+        check(BASE + section + path)
+
+# 4. Parse HTML pages for RSS links
+for page in key_pages:
+    find_rss_links_in_html(page)
+```
+
+### RSS Feed Parsing
+
+Supports both RSS 2.0 and Atom formats:
+- **RSS 2.0**: Parses `<item>` elements with `<title>`, `<link>`, `<pubDate>`
+- **Atom**: Parses `<entry>` elements with `<title>`, `<link>`, `<published>`/`<updated>`
+
+### Fallback Mechanism
+
+If no RSS feeds are discovered or they contain no items:
+1. Filters sitemap URLs for release notes and what's new pages
+2. Scrapes each page for title and publication date
+3. Uses the same aggregation and deduplication logic
 
 ## License
 
