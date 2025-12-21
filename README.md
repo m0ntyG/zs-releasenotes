@@ -1,26 +1,36 @@
 # Zscaler Release Notes RSS Generator
 
-Automatically collects and publishes Zscaler release notes from help.zscaler.com as an RSS feed.
+Automatically collects and publishes Zscaler release notes from help.zscaler.com as an RSS feed by discovering and aggregating RSS feeds from all subpages.
 
 ## Features
 
-- **Comprehensive Coverage**: Parses the complete Zscaler sitemap including sub-sitemaps and compressed (.xml.gz) files
-- **Smart Filtering**: Automatically identifies Release Notes and What's New pages
-- **Metadata Extraction**: Extracts titles and publication dates from each page
-- **RSS Feed Generation**: Creates a standards-compliant RSS 2.0 feed
+- **RSS Feed Discovery**: Automatically discovers RSS feeds from https://help.zscaler.com/rss and all product subpages
+- **Comprehensive Coverage**: Aggregates RSS feeds from all sections (ZIA, ZPA, ZDX, etc.)
+- **Future-Ready**: Automatically discovers new product sections and RSS feeds as they're added
+- **Sitemap Parsing**: Uses sitemap to discover all sections for comprehensive RSS feed coverage
+- **Smart Fallback**: Falls back to page scraping if RSS feeds are unavailable
+- **Metadata Extraction**: Extracts titles and publication dates from RSS feeds and pages
+- **RSS Feed Aggregation**: Combines multiple RSS feeds into a single comprehensive feed
 - **Automated Updates**: GitHub Actions runs twice daily to keep the feed current
 - **Year-Robust**: Date handling designed to work correctly across year transitions
 
 ## How It Works
 
-1. **Sitemap Parsing**: Fetches and parses the complete sitemap from help.zscaler.com
-2. **URL Filtering**: Identifies relevant pages containing "release-notes" or "whats-new" in their paths
-3. **Content Scraping**: Extracts title and publication date from each page using multiple strategies:
-   - Structured metadata (meta tags)
-   - HTML5 time elements
-   - Visible date text patterns
-4. **Feed Generation**: Builds an RSS feed sorted by publication date
-5. **Publishing**: Publishes to GitHub Pages via the `gh-pages` branch
+1. **Sitemap Parsing**: Fetches and parses the complete sitemap from help.zscaler.com to discover site structure
+2. **RSS Feed Discovery**: 
+   - Checks for RSS feeds at base URL (https://help.zscaler.com/rss)
+   - Discovers product sections from sitemap (e.g., /zia, /zpa, /zdx)
+   - Checks for RSS feeds at each section path
+   - Looks for RSS feed links in HTML pages
+3. **RSS Feed Aggregation**: Parses all discovered RSS feeds and aggregates items
+4. **Smart Fallback**: If no RSS feeds are found, falls back to:
+   - Filtering relevant pages containing "release-notes" or "whats-new"
+   - Scraping individual pages for title and publication date
+5. **Feed Processing**:
+   - Filters items by publication date (configurable time window)
+   - Deduplicates entries
+   - Sorts by publication date (newest first)
+6. **Publishing**: Publishes aggregated feed to GitHub Pages via the `gh-pages` branch
 
 ## Configuration
 

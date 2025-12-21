@@ -3,9 +3,11 @@
 Zscaler Help Releases RSS Generator
 
 This script collects Zscaler release notes from help.zscaler.com by:
-- Using the complete sitemap (including sub-sitemaps and .xml.gz files)
-- Filtering relevant pages (Release Notes & What's New) directly from the sitemap
-- Extracting title & publication date from each page and creating an RSS feed
+- Discovering and aggregating RSS feeds from all subpages (https://help.zscaler.com/rss and subdirectories)
+- Using the complete sitemap to find all potential RSS feed locations
+- Parsing native RSS feeds from Zscaler's help site for all products and sections
+- Falling back to page scraping if RSS feeds are unavailable
+- Supporting automatic discovery of future pages and years
 - Optionally limiting the feed with BACKFILL_DAYS (default: 14, e.g., 90)
 
 Requirements:
@@ -52,6 +54,15 @@ URL_EXCLUDE_HINTS = [
 
 # Minimal pause between fetches (polite crawling)
 FETCH_DELAY_SEC = 0.3
+
+# Common RSS feed paths to check
+RSS_PATHS = [
+    "/rss",
+    "/rss.xml",
+    "/feed",
+    "/feed.xml",
+    "/atom.xml",
+]
 
 
 def fetch(url: str, timeout: int = 30) -> str:
@@ -141,6 +152,204 @@ def parse_sitemap(url: str) -> List[str]:
                 urls.append(el.text.strip())
 
     return urls
+
+
+def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
+    """
+    Discover RSS feeds from the help.zscaler.com site.
+    
+    Strategies:
+    1. Check common RSS paths at base URL (/rss, /feed, etc.)
+    2. Extract unique path prefixes from sitemap URLs (e.g., /zia/, /zpa/, /zdx/)
+    3. Check for RSS feeds at each product/section path
+    4. Look for RSS feed links in HTML pages
+    
+    Returns a set of discovered RSS feed URLs.
+    """
+    discovered_feeds: Set[str] = set()
+    
+    # 1. Check common RSS paths at base URL
+    print(f"[INFO] Checking for RSS feeds at base URL...")
+    for rss_path in RSS_PATHS:
+        rss_url = urljoin(base_url, rss_path)
+        try:
+            response = requests.head(rss_url, headers=HEADERS, timeout=10, allow_redirects=True)
+            if response.status_code == 200:
+                # Verify it's actually an RSS/XML feed
+                content_type = response.headers.get('content-type', '').lower()
+                if 'xml' in content_type or 'rss' in content_type or 'atom' in content_type:
+                    discovered_feeds.add(rss_url)
+                    print(f"[INFO] Found RSS feed: {rss_url}")
+                else:
+                    # Try GET to check content
+                    try:
+                        content = fetch(rss_url)
+                        if '<rss' in content.lower() or '<feed' in content.lower():
+                            discovered_feeds.add(rss_url)
+                            print(f"[INFO] Found RSS feed: {rss_url}")
+                    except:
+                        pass
+            time.sleep(FETCH_DELAY_SEC)
+        except Exception as e:
+            pass
+    
+    # 2. Extract unique path prefixes from sitemap URLs
+    # These represent different product sections (e.g., /zia/, /zpa/, /zdx/, etc.)
+    path_prefixes: Set[str] = set()
+    for url in sitemap_urls:
+        parsed = urlparse(url)
+        path_parts = [p for p in parsed.path.split('/') if p]
+        if path_parts:
+            # Take first 1-2 path segments as potential product/section identifier
+            prefix = '/' + path_parts[0]
+            path_prefixes.add(prefix)
+            if len(path_parts) > 1:
+                prefix2 = '/' + '/'.join(path_parts[:2])
+                path_prefixes.add(prefix2)
+    
+    print(f"[INFO] Found {len(path_prefixes)} unique path prefixes from sitemap")
+    
+    # 3. Check for RSS feeds at each product/section path
+    for prefix in sorted(path_prefixes):
+        for rss_path in RSS_PATHS:
+            rss_url = urljoin(base_url, prefix + rss_path)
+            try:
+                response = requests.head(rss_url, headers=HEADERS, timeout=10, allow_redirects=True)
+                if response.status_code == 200:
+                    content_type = response.headers.get('content-type', '').lower()
+                    if 'xml' in content_type or 'rss' in content_type or 'atom' in content_type:
+                        discovered_feeds.add(rss_url)
+                        print(f"[INFO] Found RSS feed: {rss_url}")
+                    else:
+                        # Try GET to check content
+                        try:
+                            content = fetch(rss_url)
+                            if '<rss' in content.lower() or '<feed' in content.lower():
+                                discovered_feeds.add(rss_url)
+                                print(f"[INFO] Found RSS feed: {rss_url}")
+                        except:
+                            pass
+                time.sleep(FETCH_DELAY_SEC)
+            except Exception as e:
+                pass
+    
+    # 4. Look for RSS feed links in the main help page and key pages
+    key_pages = [base_url]
+    for prefix in list(path_prefixes)[:10]:  # Check first 10 section pages
+        key_pages.append(urljoin(base_url, prefix))
+    
+    for page_url in key_pages:
+        try:
+            html = fetch(page_url)
+            soup = BeautifulSoup(html, "html.parser")
+            
+            # Look for RSS link tags
+            for link in soup.find_all('link', type=['application/rss+xml', 'application/atom+xml']):
+                href = link.get('href')
+                if href:
+                    feed_url = urljoin(page_url, href)
+                    if is_help_domain(feed_url):
+                        discovered_feeds.add(feed_url)
+                        print(f"[INFO] Found RSS feed via link tag: {feed_url}")
+            
+            # Look for RSS links in HTML
+            for a in soup.find_all('a', href=True):
+                href = a.get('href', '')
+                if any(rss_hint in href.lower() for rss_hint in ['rss', 'feed', 'atom']):
+                    feed_url = urljoin(page_url, href)
+                    if is_help_domain(feed_url):
+                        discovered_feeds.add(feed_url)
+                        print(f"[INFO] Found RSS feed via anchor: {feed_url}")
+            
+            time.sleep(FETCH_DELAY_SEC)
+        except Exception as e:
+            pass
+    
+    return discovered_feeds
+
+
+def parse_rss_feed(feed_url: str) -> List[Dict]:
+    """
+    Parse an RSS or Atom feed and extract items.
+    
+    Returns a list of items with: title, link, published, source_page
+    """
+    items: List[Dict] = []
+    
+    try:
+        content = fetch(feed_url)
+        root = ET.fromstring(content.encode('utf-8') if isinstance(content, str) else content)
+        
+        def localname(tag: str) -> str:
+            return tag.split("}")[-1]
+        
+        root_tag = localname(root.tag)
+        
+        # Handle RSS 2.0
+        if root_tag == "rss":
+            for channel in root:
+                if localname(channel.tag) != "channel":
+                    continue
+                for item in channel:
+                    if localname(item.tag) != "item":
+                        continue
+                    
+                    title = ""
+                    link = ""
+                    pub_date = None
+                    
+                    for elem in item:
+                        tag = localname(elem.tag)
+                        if tag == "title" and elem.text:
+                            title = elem.text.strip()
+                        elif tag == "link" and elem.text:
+                            link = elem.text.strip()
+                        elif tag == "pubDate" and elem.text:
+                            pub_date = normalize_date(elem.text)
+                    
+                    if title and link:
+                        items.append({
+                            "title": title,
+                            "link": link,
+                            "published": pub_date or datetime.now(timezone.utc),
+                            "source_page": feed_url
+                        })
+        
+        # Handle Atom
+        elif root_tag == "feed":
+            for entry in root:
+                if localname(entry.tag) != "entry":
+                    continue
+                
+                title = ""
+                link = ""
+                pub_date = None
+                
+                for elem in entry:
+                    tag = localname(elem.tag)
+                    if tag == "title" and elem.text:
+                        title = elem.text.strip()
+                    elif tag == "link":
+                        href = elem.get("href")
+                        if href:
+                            link = href.strip()
+                    elif tag in ["published", "updated"] and elem.text:
+                        pub_date = normalize_date(elem.text)
+                
+                if title and link:
+                    items.append({
+                        "title": title,
+                        "link": link,
+                        "published": pub_date or datetime.now(timezone.utc),
+                        "source_page": feed_url
+                    })
+        
+        print(f"[INFO] Parsed {len(items)} items from RSS feed: {feed_url}")
+        
+    except Exception as e:
+        print(f"[WARN] Failed to parse RSS feed {feed_url}: {e}")
+    
+    return items
 
 
 def select_relevant_urls(all_urls: List[str]) -> List[str]:
@@ -272,55 +481,81 @@ def main():
     Main function to generate RSS feed.
     
     Process:
-    1. Read complete sitemap
-    2. Select relevant pages (Release Notes & What's New)
-    3. Fetch each candidate page and extract metadata
-    4. Apply time window filter (BACKFILL_DAYS)
-    5. Deduplicate by link
-    6. Build and write RSS feed
+    1. Read complete sitemap to understand site structure
+    2. Discover RSS feeds from base URL and all subpages/sections
+    3. Parse all discovered RSS feeds and aggregate items
+    4. If no RSS feeds found, fall back to page scraping
+    5. Apply time window filter (BACKFILL_DAYS)
+    6. Deduplicate by link
+    7. Build and write aggregated RSS feed
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     BACKFILL_DAYS = int(os.getenv("BACKFILL_DAYS", "14"))
     cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
 
-    # 1) Read complete sitemap
+    # 1) Read complete sitemap to understand site structure
+    print("[INFO] Step 1: Reading sitemap to discover site structure...")
     all_urls = parse_sitemap(SITEMAP_URL)
     print(f"[INFO] Total URLs from sitemap: {len(all_urls)}")
 
-    # 2) Select relevant pages (Release Notes & What's New)
-    candidates = select_relevant_urls(all_urls)
-    print(f"[INFO] Relevant pages after filter: {len(candidates)}")
-    for c in candidates[:15]:
-        print(f" - {c}")
-    if len(candidates) > 15:
-        print(f" ... ({len(candidates) - 15} more)")
-
-    # 3) Fetch each candidate page and extract metadata
+    # 2) Discover RSS feeds from base URL and all subpages/sections
+    print("[INFO] Step 2: Discovering RSS feeds from all subpages...")
+    discovered_feeds = discover_rss_feeds(BASE, all_urls)
+    print(f"[INFO] Total RSS feeds discovered: {len(discovered_feeds)}")
+    
     aggregated: List[Dict] = []
-    for url in candidates:
-        try:
-            html = fetch(url)
-            soup = BeautifulSoup(html, "html.parser")
-            title = extract_title(soup, default=url)
-            published = extract_date_from_soup(soup)
-            aggregated.append({
-                "title": title,
-                "link": url,
-                "published": published,
-                "source_page": url
-            })
-            time.sleep(FETCH_DELAY_SEC)
-        except Exception as e:
-            print(f"[WARN] Error fetching: {url} -> {e}")
+    
+    # 3) Parse all discovered RSS feeds
+    if discovered_feeds:
+        print("[INFO] Step 3: Parsing discovered RSS feeds...")
+        for feed_url in discovered_feeds:
+            try:
+                items = parse_rss_feed(feed_url)
+                aggregated.extend(items)
+                time.sleep(FETCH_DELAY_SEC)
+            except Exception as e:
+                print(f"[WARN] Error parsing RSS feed {feed_url}: {e}")
+        
+        print(f"[INFO] Total items from RSS feeds: {len(aggregated)}")
+    
+    # 4) If no RSS feeds found or no items, fall back to page scraping
+    if not aggregated:
+        print("[INFO] Step 4: No RSS feeds found or no items, falling back to page scraping...")
+        candidates = select_relevant_urls(all_urls)
+        print(f"[INFO] Relevant pages after filter: {len(candidates)}")
+        for c in candidates[:15]:
+            print(f" - {c}")
+        if len(candidates) > 15:
+            print(f" ... ({len(candidates) - 15} more)")
+        
+        for url in candidates:
+            try:
+                html = fetch(url)
+                soup = BeautifulSoup(html, "html.parser")
+                title = extract_title(soup, default=url)
+                published = extract_date_from_soup(soup)
+                aggregated.append({
+                    "title": title,
+                    "link": url,
+                    "published": published,
+                    "source_page": url
+                })
+                time.sleep(FETCH_DELAY_SEC)
+            except Exception as e:
+                print(f"[WARN] Error fetching: {url} -> {e}")
+        
+        print(f"[INFO] Total items from page scraping: {len(aggregated)}")
+    else:
+        print("[INFO] Step 4: Skipping page scraping (RSS feeds provided sufficient data)")
 
-    print(f"[INFO] Total extracted pages: {len(aggregated)}")
+    print(f"[INFO] Total extracted items: {len(aggregated)}")
 
-    # 4) Apply time window
+    # 5) Apply time window
     window_items = [it for it in aggregated if it["published"] >= cutoff]
-    print(f"[INFO] Within last {BACKFILL_DAYS} days: {len(window_items)}")
+    print(f"[INFO] Step 5: Items within last {BACKFILL_DAYS} days: {len(window_items)}")
 
-    # 5) Deduplicate by link
+    # 6) Deduplicate by link
     final: List[Dict] = []
     seen = set()
     for it in window_items:
@@ -328,12 +563,15 @@ def main():
             continue
         seen.add(it["link"])
         final.append(it)
+    
+    print(f"[INFO] Step 6: Items after deduplication: {len(final)}")
 
-    # 6) Build and write RSS
+    # 7) Build and write aggregated RSS
     rss_xml = build_feed(final)
     with open(OUTPUT_PATH, "wb") as f:
         f.write(rss_xml)
-    print(f"[INFO] RSS written: {OUTPUT_PATH}")
+    print(f"[INFO] Step 7: RSS written: {OUTPUT_PATH}")
+    print(f"[INFO] Final feed contains {len(final)} items")
 
 
 if __name__ == "__main__":
