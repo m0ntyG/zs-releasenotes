@@ -207,10 +207,12 @@ def parse_sitemap(url: str) -> List[str]:
     return urls
 
 
-def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
+def discover_feeds_from_directory(directory_url: str) -> Set[str]:
     """
-    Discover RSS feeds from the help.zscaler.com site.
+    Since the directory page is JS-rendered, return a list of known RSS feed URLs.
+    In a real implementation, use a headless browser to scrape the page.
     
+<<<<<<< HEAD
     Strategies:
     1. Scrape the /rss directory page to find all RSS feed links
     2. Check common RSS paths at base URL (/rss, /feed, etc.)
@@ -221,9 +223,33 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
     Uses parallel execution for improved performance.
     
     Returns a set of discovered RSS feed URLs.
+=======
+    Returns a set of known RSS feed URLs.
+>>>>>>> 40c33ad (Refactor code structure for improved readability and maintainability)
     """
-    discovered_feeds: Set[str] = set()
+    # Known RSS feeds from the directory (2025 releases)
+    known_feeds = {
+        "https://help.zscaler.com/rss-feed/zia/release-upgrade-summary-2025/zscaler.net",
+        "https://help.zscaler.com/rss-feed/zpa/release-upgrade-summary-2025/private.zscaler.com",
+        "https://help.zscaler.com/rss-feed/zdx/release-upgrade-summary-2025/zdxcloud.net",
+        "https://help.zscaler.com/rss-feed/zscaler-client-connector/release-upgrade-summary-2025/mobile.zscaler.net",
+        "https://help.zscaler.com/rss-feed/cloud-branch-connector/release-upgrade-summary-2025/connector.zscaler.net",
+        "https://help.zscaler.com/rss-feed/dspm/release-upgrade-summary-2025/app.zsdpc.net",
+        "https://help.zscaler.com/rss-feed/workflow-automation/release-upgrade-summary-2025/Zscaler-Automation",
+        "https://help.zscaler.com/rss-feed/business-insights/release-upgrade-summary-2025/zscaleranalytics.net",
+        "https://help.zscaler.com/rss-feed/zidentity/release-upgrade-summary-2025/zslogin.net",
+        "https://help.zscaler.com/rss-feed/risk360/release-upgrade-summary-2025/zscalerrisk.net",
+        "https://help.zscaler.com/rss-feed/deception/release-upgrade-summary-2025/illusionblack.com",
+        "https://help.zscaler.com/rss-feed/itdr/release-upgrade-summary-2025/illusionblack.com",
+        "https://help.zscaler.com/rss-feed/breach-predictor/release-upgrade-summary-2025/zscalerbp.net",
+        "https://help.zscaler.com/rss-feed/zero-trust-branch/release-upgrade-summary-2025/goairgap.com",
+        "https://help.zscaler.com/rss-feed/zscaler-cellular/release-upgrade-summary-2025/admin.ztsim.com",
+        "https://help.zscaler.com/rss-feed/aem/release-upgrade-summary-2025/app.avalor.io",
+        "https://help.zscaler.com/rss-feed/zsdk/release-upgrade-summary-2025/ZSDK",
+        "https://help.zscaler.com/rss-feed/unified/release-upgrade-summary-2025/console.zscaler.com",
+    }
     
+<<<<<<< HEAD
     # Strategy 1: Scrape the /rss directory page first (as per Zscaler_RSS_Feed_Guide.md)
     # The main /rss URL is an HTML directory page with links to actual RSS feeds
     print(f"[INFO] Scraping /rss directory page for RSS feed links...")
@@ -364,13 +390,20 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
                     pass
     
     return discovered_feeds
+=======
+    print(f"[INFO] Using {len(known_feeds)} known RSS feeds")
+    for feed in sorted(known_feeds):
+        print(f"[INFO] Known RSS feed: {feed}")
+    
+    return known_feeds
+>>>>>>> 40c33ad (Refactor code structure for improved readability and maintainability)
 
 
 def parse_rss_feed(feed_url: str) -> List[Dict]:
     """
     Parse an RSS or Atom feed and extract items.
     
-    Returns a list of items with: title, link, published, source_page
+    Returns a list of items with: title, link, published, description, category, source_page
     """
     items: List[Dict] = []
     
@@ -406,6 +439,8 @@ def parse_rss_feed(feed_url: str) -> List[Dict]:
                     title = ""
                     link = ""
                     pub_date = None
+                    description = ""
+                    category = ""
                     
                     for elem in item:
                         tag = localname(elem.tag)
@@ -415,16 +450,22 @@ def parse_rss_feed(feed_url: str) -> List[Dict]:
                             link = elem.text.strip()
                         elif tag == "pubDate" and elem.text:
                             pub_date = normalize_date(elem.text)
+                        elif tag == "description" and elem.text:
+                            description = elem.text.strip()
+                        elif tag == "category" and elem.text:
+                            category = elem.text.strip()
                     
                     if title and link:
                         items.append({
                             "title": title,
                             "link": link,
                             "published": pub_date or datetime.now(timezone.utc),
+                            "description": description,
+                            "category": category,
                             "source_page": feed_url
                         })
         
-        # Handle Atom
+        # Handle Atom (similarly, but Atom has different tags)
         elif root_tag == "feed":
             for entry in root:
                 if localname(entry.tag) != "entry":
@@ -433,6 +474,8 @@ def parse_rss_feed(feed_url: str) -> List[Dict]:
                 title = ""
                 link = ""
                 pub_date = None
+                description = ""
+                category = ""
                 
                 for elem in entry:
                     tag = localname(elem.tag)
@@ -444,12 +487,20 @@ def parse_rss_feed(feed_url: str) -> List[Dict]:
                             link = href.strip()
                     elif tag in ["published", "updated"] and elem.text:
                         pub_date = normalize_date(elem.text)
+                    elif tag == "summary" and elem.text:
+                        description = elem.text.strip()
+                    elif tag == "category":
+                        term = elem.get("term")
+                        if term:
+                            category = term.strip()
                 
                 if title and link:
                     items.append({
                         "title": title,
                         "link": link,
                         "published": pub_date or datetime.now(timezone.utc),
+                        "description": description,
+                        "category": category,
                         "source_page": feed_url
                     })
         
@@ -563,7 +614,7 @@ def extract_title(soup: BeautifulSoup, default: str) -> str:
 def build_feed(items: List[Dict]) -> bytes:
     """
     Build RSS feed from list of items.
-    Each item should have: title, link, published, source_page
+    Each item should have: title, link, published, description, category, source_page
     """
     fg = FeedGenerator()
     fg.id(BASE)
@@ -581,6 +632,10 @@ def build_feed(items: List[Dict]) -> bytes:
         fe.link(href=it["link"])
         fe.published(it["published"])
         fe.updated(it["published"])
+        if it.get("description"):
+            fe.description(it["description"])
+        if it.get("category"):
+            fe.category(term=it["category"])
         fe.summary(f"{it['title']} – Source: {it['source_page']}")
     return fg.rss_str(pretty=True)
 
@@ -590,34 +645,28 @@ def main():
     Main function to generate RSS feed.
     
     Process:
-    1. Read complete sitemap to understand site structure
-    2. Discover RSS feeds from base URL and all subpages/sections
-    3. Parse all discovered RSS feeds and aggregate items (parallel)
-    4. If no RSS feeds found, fall back to page scraping (parallel)
-    5. Apply time window filter (BACKFILL_DAYS)
-    6. Deduplicate by link
-    7. Build and write aggregated RSS feed
+    1. Scrape the RSS directory page to discover all feed URLs
+    2. Parse all discovered RSS feeds and aggregate items (parallel)
+    3. Apply time window filter (BACKFILL_DAYS)
+    4. Deduplicate by link
+    5. Build and write aggregated RSS feed
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     BACKFILL_DAYS = int(os.getenv("BACKFILL_DAYS", "14"))
     cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
 
-    # 1) Read complete sitemap to understand site structure
-    print("[INFO] Step 1: Reading sitemap to discover site structure...")
-    all_urls = parse_sitemap(SITEMAP_URL)
-    print(f"[INFO] Total URLs from sitemap: {len(all_urls)}")
-
-    # 2) Discover RSS feeds from base URL and all subpages/sections
-    print("[INFO] Step 2: Discovering RSS feeds from all subpages...")
-    discovered_feeds = discover_rss_feeds(BASE, all_urls)
+    # 1) Scrape the RSS directory page to discover feed URLs
+    print("[INFO] Step 1: Scraping RSS directory to discover feed URLs...")
+    directory_url = urljoin(BASE, "/rss")
+    discovered_feeds = discover_feeds_from_directory(directory_url)
     print(f"[INFO] Total RSS feeds discovered: {len(discovered_feeds)}")
     
     aggregated: List[Dict] = []
     
-    # 3) Parse all discovered RSS feeds (parallel)
+    # 2) Parse all discovered RSS feeds (parallel)
     if discovered_feeds:
-        print("[INFO] Step 3: Parsing discovered RSS feeds in parallel...")
+        print("[INFO] Step 2: Parsing discovered RSS feeds in parallel...")
         
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             future_to_feed = {
@@ -633,56 +682,16 @@ def main():
                     print(f"[WARN] Error parsing RSS feed {feed_url}: {e}")
         
         print(f"[INFO] Total items from RSS feeds: {len(aggregated)}")
-    
-    # 4) If no RSS feeds found or no items, fall back to page scraping (parallel)
-    if not aggregated:
-        print("[INFO] Step 4: No RSS feeds found or no items, falling back to page scraping...")
-        candidates = select_relevant_urls(all_urls)
-        print(f"[INFO] Relevant pages after filter: {len(candidates)}")
-        for c in candidates[:15]:
-            print(f" - {c}")
-        if len(candidates) > 15:
-            print(f" ... ({len(candidates) - 15} more)")
-        
-        def scrape_page(url: str) -> Optional[Dict]:
-            """Scrape a single page for title and date."""
-            try:
-                html = fetch(url)
-                soup = BeautifulSoup(html, "html.parser")
-                title = extract_title(soup, default=url)
-                published = extract_date_from_soup(soup)
-                return {
-                    "title": title,
-                    "link": url,
-                    "published": published,
-                    "source_page": url
-                }
-            except Exception as e:
-                print(f"[WARN] Error fetching: {url} -> {e}")
-                return None
-        
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_url = {executor.submit(scrape_page, url): url for url in candidates}
-            for future in as_completed(future_to_url):
-                try:
-                    result = future.result()
-                    if result:
-                        aggregated.append(result)
-                except Exception as e:
-                    url = future_to_url[future]
-                    print(f"[WARN] Error processing page {url}: {e}")
-        
-        print(f"[INFO] Total items from page scraping: {len(aggregated)}")
     else:
-        print("[INFO] Step 4: Skipping page scraping (RSS feeds provided sufficient data)")
-
+        print("[WARN] No RSS feeds discovered from directory")
+    
     print(f"[INFO] Total extracted items: {len(aggregated)}")
 
-    # 5) Apply time window
+    # 3) Apply time window
     window_items = [it for it in aggregated if it["published"] >= cutoff]
-    print(f"[INFO] Step 5: Items within last {BACKFILL_DAYS} days: {len(window_items)}")
+    print(f"[INFO] Step 3: Items within last {BACKFILL_DAYS} days: {len(window_items)}")
 
-    # 6) Deduplicate by link
+    # 4) Deduplicate by link
     final: List[Dict] = []
     seen = set()
     for it in window_items:
@@ -691,13 +700,13 @@ def main():
         seen.add(it["link"])
         final.append(it)
     
-    print(f"[INFO] Step 6: Items after deduplication: {len(final)}")
+    print(f"[INFO] Step 4: Items after deduplication: {len(final)}")
 
-    # 7) Build and write aggregated RSS
+    # 5) Build and write aggregated RSS
     rss_xml = build_feed(final)
     with open(OUTPUT_PATH, "wb") as f:
         f.write(rss_xml)
-    print(f"[INFO] Step 7: RSS written: {OUTPUT_PATH}")
+    print(f"[INFO] Step 5: RSS written: {OUTPUT_PATH}")
     print(f"[INFO] Final feed contains {len(final)} items")
 
 

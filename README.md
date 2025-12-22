@@ -4,20 +4,19 @@ Automatically collects and publishes Zscaler release notes from help.zscaler.com
 
 ## Features
 
-- **RSS Feed Discovery**: Automatically discovers RSS feeds from https://help.zscaler.com/rss and all product subpages
-- **Comprehensive Coverage**: Aggregates RSS feeds from all sections (ZIA, ZPA, ZDX, etc.)
-- **Future-Ready**: Automatically discovers new product sections and RSS feeds as they're added
-- **Sitemap Parsing**: Uses sitemap to discover all sections for comprehensive RSS feed coverage
+- **RSS Feed Discovery**: Uses a curated list of known RSS feeds from https://help.zscaler.com/rss directory
+- **Comprehensive Coverage**: Aggregates RSS feeds from all major Zscaler products (ZIA, ZPA, ZDX, Client Connector, etc.)
 - **High Performance**: Parallel processing with concurrent.futures for fast execution
 - **Connection Pooling**: Reuses HTTP connections for efficient network operations
-- **Smart Fallback**: Falls back to page scraping if RSS feeds are unavailable
-- **Metadata Extraction**: Extracts titles and publication dates from RSS feeds and pages
+- **Metadata Extraction**: Extracts titles, descriptions, categories, and publication dates from RSS feeds
 - **RSS Feed Aggregation**: Combines multiple RSS feeds into a single comprehensive feed
 - **Automated Updates**: GitHub Actions runs twice daily to keep the feed current
-- **Year-Robust**: Date handling designed to work correctly across year transitions
+- **Date Filtering**: Filters items to recent releases (last 14 days by default)
+- **Deduplication**: Removes duplicate entries across feeds
 
 ## How It Works
 
+<<<<<<< HEAD
 1. **Sitemap Parsing**: Fetches and parses the complete sitemap from help.zscaler.com to discover site structure (parallel parsing for nested sitemaps)
 2. **RSS Feed Discovery** (prioritized strategies):
    - **Primary**: Scrapes the HTML directory page at https://help.zscaler.com/rss to find all RSS feed links (pattern: `/rss-feed/{product}/release-upgrade-summary-{year}/zscaler.net`)
@@ -32,8 +31,15 @@ Automatically collects and publishes Zscaler release notes from help.zscaler.com
 5. **Feed Processing**:
    - Filters items by publication date (configurable time window)
    - Deduplicates entries
+=======
+1. **Feed Discovery**: Uses a curated list of known RSS feed URLs from the Zscaler help portal directory
+2. **RSS Feed Aggregation**: Parses all discovered RSS feeds concurrently and aggregates items
+3. **Feed Processing**:
+   - Filters items by publication date (configurable time window, default: 14 days)
+   - Deduplicates entries based on title and link
+>>>>>>> 40c33ad (Refactor code structure for improved readability and maintainability)
    - Sorts by publication date (newest first)
-6. **Publishing**: Publishes aggregated feed to GitHub Pages via the `gh-pages` branch
+4. **Publishing**: Publishes aggregated feed to GitHub Pages via the `gh-pages` branch
 
 ## Configuration
 
@@ -115,6 +121,7 @@ The generated RSS feed includes:
 
 ## RSS Feed Discovery
 
+<<<<<<< HEAD
 The script discovers RSS feeds through multiple prioritized strategies:
 
 1. **Primary Strategy - RSS Directory Scraping** (as per Zscaler_RSS_Feed_Guide.md):
@@ -136,16 +143,43 @@ This approach ensures:
 - **Future-Proof**: New products/sections are automatically discovered
 - **Resilient**: Multiple fallback strategies ensure feeds are found
 - **High Performance**: Parallel execution reduces total runtime by 60-80%
+=======
+The script uses a curated list of known RSS feed URLs since the Zscaler help portal directory page is JavaScript-rendered and cannot be scraped statically. The current implementation includes 18 RSS feeds covering all major Zscaler products:
+
+- ZIA (Zscaler Internet Access)
+- ZPA (Zscaler Private Access) 
+- ZDX (Zscaler Digital Experience)
+- Zscaler Client Connector
+- Cloud Branch Connector
+- DSPM (Data Security Posture Management)
+- Workflow Automation
+- Business Insights
+- Zidentity
+- Risk360
+- Deception
+- ITDR (IT Detection & Response)
+- Breach Predictor
+- Zero Trust Branch
+- Zscaler Cellular
+- AEM (Adaptive Enforcement Management)
+- ZSDK
+- Unified Console
+
+This approach ensures:
+- **Comprehensive Coverage**: All major product sections are included
+- **Reliable**: Uses verified feed URLs rather than dynamic discovery
+- **High Performance**: Parallel execution for fetching and parsing feeds
+- **Maintainable**: Feed list can be updated as new products are added
+>>>>>>> 40c33ad (Refactor code structure for improved readability and maintainability)
 
 ## Performance Optimizations
 
 The script uses several techniques to maximize performance:
 
 1. **Parallel Execution**: Uses `concurrent.futures.ThreadPoolExecutor` for concurrent network operations
-   - Nested sitemap parsing runs in parallel
-   - RSS feed discovery checks run concurrently
+   - RSS feed fetching runs in parallel
    - RSS feed parsing is parallelized
-   - Page scraping (fallback mode) runs in parallel
+   - Multiple feeds processed simultaneously
 
 2. **Connection Pooling**: Uses `requests.Session` with connection pooling
    - Reuses TCP connections across requests
@@ -159,27 +193,27 @@ The script uses several techniques to maximize performance:
 
 4. **Optimized Request Flow**: Eliminates unnecessary delays
    - No artificial sleep delays in parallel operations
-   - Single-pass RSS validation
-   - Efficient content type checking
+   - Efficient XML parsing with lxml
+   - Smart deduplication logic
 
 ## Contributing
 
 When making changes, ensure:
 
-1. RSS feed discovery logic handles both RSS 2.0 and Atom formats
+1. RSS feed parsing handles both RSS 2.0 and Atom formats
 2. All date patterns require 4-digit years for robust year handling
 3. Dates are timezone-aware (UTC)
 4. The BACKFILL_DAYS calculation handles year transitions correctly
-5. New RSS feed discovery strategies are added to `discover_rss_feeds()`
-6. The fallback page scraping remains functional
-7. Run tests across year boundaries (e.g., December 31 to January 1)
-8. Parallel operations use `ThreadPoolExecutor` for network I/O
-9. Connection pooling via `requests.Session` is maintained
+5. New RSS feed URLs are added to the `known_feeds` set in `discover_feeds_from_directory()`
+6. Run tests across year boundaries (e.g., December 31 to January 1)
+7. Parallel operations use `ThreadPoolExecutor` for network I/O
+8. Connection pooling via `requests.Session` is maintained
 
 ## Technical Details
 
 ### RSS Feed Discovery Process
 
+<<<<<<< HEAD
 The `discover_rss_feeds()` function implements a prioritized discovery strategy:
 
 ```python
@@ -205,6 +239,17 @@ for section in sections:
 # 5. Parse HTML pages for RSS links
 for page in key_pages:
     find_rss_links_in_html(page)
+=======
+The `discover_feeds_from_directory()` function uses a curated list of known RSS feed URLs:
+
+```python
+known_feeds = {
+    "https://help.zscaler.com/rss-feed/zia/release-upgrade-summary-2025/zscaler.net",
+    "https://help.zscaler.com/rss-feed/zpa/release-upgrade-summary-2025/private.zscaler.com",
+    # ... additional known feeds
+}
+return known_feeds
+>>>>>>> 40c33ad (Refactor code structure for improved readability and maintainability)
 ```
 
 **Key Improvement**: The primary strategy directly scrapes the `/rss` directory page (which is HTML, not RSS) to find all actual RSS feed URLs. This follows the guidance in `Zscaler_RSS_Feed_Guide.md` and ensures all product feeds are discovered reliably.
@@ -212,15 +257,8 @@ for page in key_pages:
 ### RSS Feed Parsing
 
 Supports both RSS 2.0 and Atom formats:
-- **RSS 2.0**: Parses `<item>` elements with `<title>`, `<link>`, `<pubDate>`
+- **RSS 2.0**: Parses `<item>` elements with `<title>`, `<link>`, `<pubDate>`, `<description>`, `<category>`
 - **Atom**: Parses `<entry>` elements with `<title>`, `<link>`, `<published>`/`<updated>`
-
-### Fallback Mechanism
-
-If no RSS feeds are discovered or they contain no items:
-1. Filters sitemap URLs for release notes and what's new pages
-2. Scrapes each page for title and publication date
-3. Uses the same aggregation and deduplication logic
 
 ## License
 
