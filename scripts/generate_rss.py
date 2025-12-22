@@ -27,6 +27,7 @@ from xml.etree import ElementTree as ET
 from bs4 import BeautifulSoup
 from feedgen.feed import FeedGenerator
 from dateutil import parser as dateparser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE = "https://help.zscaler.com"
 SITEMAP_URL = f"{BASE}/sitemap.xml"
@@ -52,8 +53,11 @@ URL_EXCLUDE_HINTS = [
     "/tag/", "/taxonomy/", "/author/", "/search", "/attachment", "/node/",
 ]
 
-# Minimal pause between fetches (polite crawling)
+# Minimal pause between fetches (polite crawling) - only used in sequential operations
 FETCH_DELAY_SEC = 0.3
+
+# Concurrency settings for parallel operations
+MAX_WORKERS = 10  # Max concurrent threads for network operations
 
 # Common RSS feed paths to check
 RSS_PATHS = [
@@ -70,15 +74,37 @@ RSS_MIME_TYPES = ['xml', 'rss', 'atom']
 # Maximum number of section pages to check for RSS links
 MAX_SECTION_PAGES_TO_CHECK = 10
 
+# Global session for connection pooling
+_session: Optional[requests.Session] = None
+
+
+def get_session() -> requests.Session:
+    """Get or create a global requests session for connection pooling."""
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=20,
+            pool_maxsize=20,
+            max_retries=3,
+            pool_block=False
+        )
+        _session.mount('http://', adapter)
+        _session.mount('https://', adapter)
+        _session.headers.update(HEADERS)
+    return _session
+
 
 def fetch(url: str, timeout: int = 30) -> str:
-    r = requests.get(url, headers=HEADERS, timeout=timeout)
+    session = get_session()
+    r = session.get(url, timeout=timeout)
     r.raise_for_status()
     return r.text
 
 
 def fetch_bytes(url: str, timeout: int = 30) -> bytes:
-    r = requests.get(url, headers=HEADERS, timeout=timeout)
+    session = get_session()
+    r = session.get(url, timeout=timeout)
     r.raise_for_status()
     return r.content
 
@@ -113,6 +139,7 @@ def parse_sitemap(url: str) -> List[str]:
     """
     Loads sitemap.xml or a sub-sitemap. Supports sitemapindex recursively and .xml.gz.
     Returns a flat list of all <loc> URLs.
+    Uses parallel fetching for nested sitemaps.
     """
     try:
         raw = fetch_bytes(url)
@@ -134,13 +161,26 @@ def parse_sitemap(url: str) -> List[str]:
 
     tag = localname(root.tag)
     if tag == "sitemapindex":
+        # Extract all nested sitemap URLs
+        nested_sitemaps = []
         for sm in root:
             if localname(sm.tag) != "sitemap":
                 continue
             loc_el = next((c for c in sm if localname(c.tag) == "loc"), None)
             if loc_el is not None and loc_el.text:
-                sub = loc_el.text.strip()
-                urls.extend(parse_sitemap(sub))
+                nested_sitemaps.append(loc_el.text.strip())
+        
+        # Parallel fetch of nested sitemaps
+        if nested_sitemaps:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                future_to_url = {executor.submit(parse_sitemap, sitemap_url): sitemap_url 
+                                for sitemap_url in nested_sitemaps}
+                for future in as_completed(future_to_url):
+                    try:
+                        urls.extend(future.result())
+                    except Exception as e:
+                        sitemap_url = future_to_url[future]
+                        print(f"[WARN] Error parsing nested sitemap {sitemap_url}: {e}")
         return urls
 
     if tag == "urlset":
@@ -170,42 +210,48 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
     3. Check for RSS feeds at each product/section path
     4. Look for RSS feed links in HTML pages
     
+    Uses parallel execution for improved performance.
+    
     Returns a set of discovered RSS feed URLs.
     """
     discovered_feeds: Set[str] = set()
     
-    def check_rss_url(rss_url: str) -> bool:
+    def check_rss_url(rss_url: str) -> Optional[str]:
         """
         Helper function to check if a URL is a valid RSS feed.
-        Returns True if the URL is a valid RSS/Atom feed.
+        Returns the URL if valid, None otherwise.
         """
         try:
-            response = requests.head(rss_url, headers=HEADERS, timeout=10, allow_redirects=True)
+            session = get_session()
+            response = session.head(rss_url, timeout=10, allow_redirects=True)
             if response.status_code == 200:
                 # Verify it's actually an RSS/XML feed
                 content_type = response.headers.get('content-type', '').lower()
                 if any(mime_type in content_type for mime_type in RSS_MIME_TYPES):
-                    return True
+                    return rss_url
                 else:
                     # Try GET to check content
                     try:
                         content = fetch(rss_url)
                         if '<rss' in content.lower() or '<feed' in content.lower():
-                            return True
+                            return rss_url
                     except Exception:
                         pass
-            time.sleep(FETCH_DELAY_SEC)
         except Exception:
             pass
-        return False
+        return None
     
     # 1. Check common RSS paths at base URL
     print(f"[INFO] Checking for RSS feeds at base URL...")
-    for rss_path in RSS_PATHS:
-        rss_url = urljoin(base_url, rss_path)
-        if check_rss_url(rss_url):
-            discovered_feeds.add(rss_url)
-            print(f"[INFO] Found RSS feed: {rss_url}")
+    base_rss_urls = [urljoin(base_url, rss_path) for rss_path in RSS_PATHS]
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_url = {executor.submit(check_rss_url, url): url for url in base_rss_urls}
+        for future in as_completed(future_to_url):
+            result = future.result()
+            if result:
+                discovered_feeds.add(result)
+                print(f"[INFO] Found RSS feed: {result}")
     
     # 2. Extract unique path prefixes from sitemap URLs
     # These represent different product sections (e.g., /zia/, /zpa/, /zdx/, etc.)
@@ -223,20 +269,28 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
     
     print(f"[INFO] Found {len(path_prefixes)} unique path prefixes from sitemap")
     
-    # 3. Check for RSS feeds at each product/section path
+    # 3. Check for RSS feeds at each product/section path (parallel)
+    section_rss_urls = []
     for prefix in sorted(path_prefixes):
         for rss_path in RSS_PATHS:
-            rss_url = urljoin(base_url, prefix + rss_path)
-            if check_rss_url(rss_url):
-                discovered_feeds.add(rss_url)
-                print(f"[INFO] Found RSS feed: {rss_url}")
+            section_rss_urls.append(urljoin(base_url, prefix + rss_path))
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_url = {executor.submit(check_rss_url, url): url for url in section_rss_urls}
+        for future in as_completed(future_to_url):
+            result = future.result()
+            if result:
+                discovered_feeds.add(result)
+                print(f"[INFO] Found RSS feed: {result}")
     
     # 4. Look for RSS feed links in the main help page and key pages
     key_pages = [base_url]
     for prefix in list(path_prefixes)[:MAX_SECTION_PAGES_TO_CHECK]:
         key_pages.append(urljoin(base_url, prefix))
     
-    for page_url in key_pages:
+    def find_rss_in_page(page_url: str) -> Set[str]:
+        """Find RSS feed links in an HTML page."""
+        feeds = set()
         try:
             html = fetch(page_url)
             soup = BeautifulSoup(html, "html.parser")
@@ -247,8 +301,7 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
                 if href:
                     feed_url = urljoin(page_url, href)
                     if is_help_domain(feed_url):
-                        discovered_feeds.add(feed_url)
-                        print(f"[INFO] Found RSS feed via link tag: {feed_url}")
+                        feeds.add(feed_url)
             
             # Look for RSS links in HTML
             for a in soup.find_all('a', href=True):
@@ -256,12 +309,23 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
                 if any(rss_hint in href.lower() for rss_hint in ['rss', 'feed', 'atom']):
                     feed_url = urljoin(page_url, href)
                     if is_help_domain(feed_url):
-                        discovered_feeds.add(feed_url)
-                        print(f"[INFO] Found RSS feed via anchor: {feed_url}")
-            
-            time.sleep(FETCH_DELAY_SEC)
-        except Exception as e:
+                        feeds.add(feed_url)
+        except Exception:
             pass
+        return feeds
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_page = {executor.submit(find_rss_in_page, page_url): page_url 
+                         for page_url in key_pages}
+        for future in as_completed(future_to_page):
+            try:
+                feeds = future.result()
+                for feed_url in feeds:
+                    if feed_url not in discovered_feeds:
+                        discovered_feeds.add(feed_url)
+                        print(f"[INFO] Found RSS feed via HTML: {feed_url}")
+            except Exception as e:
+                pass
     
     return discovered_feeds
 
@@ -492,8 +556,8 @@ def main():
     Process:
     1. Read complete sitemap to understand site structure
     2. Discover RSS feeds from base URL and all subpages/sections
-    3. Parse all discovered RSS feeds and aggregate items
-    4. If no RSS feeds found, fall back to page scraping
+    3. Parse all discovered RSS feeds and aggregate items (parallel)
+    4. If no RSS feeds found, fall back to page scraping (parallel)
     5. Apply time window filter (BACKFILL_DAYS)
     6. Deduplicate by link
     7. Build and write aggregated RSS feed
@@ -515,20 +579,24 @@ def main():
     
     aggregated: List[Dict] = []
     
-    # 3) Parse all discovered RSS feeds
+    # 3) Parse all discovered RSS feeds (parallel)
     if discovered_feeds:
-        print("[INFO] Step 3: Parsing discovered RSS feeds...")
-        for feed_url in discovered_feeds:
-            try:
-                items = parse_rss_feed(feed_url)
-                aggregated.extend(items)
-                time.sleep(FETCH_DELAY_SEC)
-            except Exception as e:
-                print(f"[WARN] Error parsing RSS feed {feed_url}: {e}")
+        print("[INFO] Step 3: Parsing discovered RSS feeds in parallel...")
+        
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_feed = {executor.submit(parse_rss_feed, feed_url): feed_url 
+                            for feed_url in discovered_feeds}
+            for future in as_completed(future_to_feed):
+                feed_url = future_to_feed[future]
+                try:
+                    items = future.result()
+                    aggregated.extend(items)
+                except Exception as e:
+                    print(f"[WARN] Error parsing RSS feed {feed_url}: {e}")
         
         print(f"[INFO] Total items from RSS feeds: {len(aggregated)}")
     
-    # 4) If no RSS feeds found or no items, fall back to page scraping
+    # 4) If no RSS feeds found or no items, fall back to page scraping (parallel)
     if not aggregated:
         print("[INFO] Step 4: No RSS feeds found or no items, falling back to page scraping...")
         candidates = select_relevant_urls(all_urls)
@@ -538,21 +606,33 @@ def main():
         if len(candidates) > 15:
             print(f" ... ({len(candidates) - 15} more)")
         
-        for url in candidates:
+        def scrape_page(url: str) -> Optional[Dict]:
+            """Scrape a single page for title and date."""
             try:
                 html = fetch(url)
                 soup = BeautifulSoup(html, "html.parser")
                 title = extract_title(soup, default=url)
                 published = extract_date_from_soup(soup)
-                aggregated.append({
+                return {
                     "title": title,
                     "link": url,
                     "published": published,
                     "source_page": url
-                })
-                time.sleep(FETCH_DELAY_SEC)
+                }
             except Exception as e:
                 print(f"[WARN] Error fetching: {url} -> {e}")
+                return None
+        
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_url = {executor.submit(scrape_page, url): url for url in candidates}
+            for future in as_completed(future_to_url):
+                try:
+                    result = future.result()
+                    if result:
+                        aggregated.append(result)
+                except Exception as e:
+                    url = future_to_url[future]
+                    print(f"[WARN] Error processing page {url}: {e}")
         
         print(f"[INFO] Total items from page scraping: {len(aggregated)}")
     else:
