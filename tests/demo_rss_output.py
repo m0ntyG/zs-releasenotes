@@ -9,8 +9,8 @@ import os
 from datetime import datetime, timezone, timedelta
 from xml.etree import ElementTree as ET
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from scripts.generate_rss import build_feed
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
+from generate_rss import build_feed
 
 # Create sample items that would come from aggregating multiple RSS feeds
 today = datetime.now(timezone.utc)
