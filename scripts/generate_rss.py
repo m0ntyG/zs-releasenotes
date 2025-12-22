@@ -89,8 +89,8 @@ def get_session() -> requests.Session:
             if _session is None:
                 _session = requests.Session()
                 adapter = requests.adapters.HTTPAdapter(
-                    pool_connections=20,
-                    pool_maxsize=20,
+                    pool_connections=MAX_WORKERS,
+                    pool_maxsize=MAX_WORKERS,
                     max_retries=3,
                     pool_block=False  # Raise exception instead of blocking when pool is exhausted
                 )
@@ -223,9 +223,9 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
     """
     discovered_feeds: Set[str] = set()
     
-    def check_rss_url(rss_url: str) -> Optional[str]:
+    def validate_rss_url(rss_url: str) -> Optional[str]:
         """
-        Helper function to check if a URL is a valid RSS feed.
+        Validate if a URL is a valid RSS feed.
         Returns the URL if valid, None otherwise.
         """
         try:
@@ -253,7 +253,7 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
     base_rss_urls = [urljoin(base_url, rss_path) for rss_path in RSS_PATHS]
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_url = {executor.submit(check_rss_url, url): url for url in base_rss_urls}
+        future_to_url = {executor.submit(validate_rss_url, url): url for url in base_rss_urls}
         for future in as_completed(future_to_url):
             result = future.result()
             if result:
@@ -283,7 +283,7 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
             section_rss_urls.append(urljoin(base_url, prefix + rss_path))
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_url = {executor.submit(check_rss_url, url): url for url in section_rss_urls}
+        future_to_url = {executor.submit(validate_rss_url, url): url for url in section_rss_urls}
         for future in as_completed(future_to_url):
             result = future.result()
             if result:
