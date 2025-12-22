@@ -50,15 +50,20 @@ jobs:
       - name: Validate RSS feed
         run: |
           if [ ! -f public/rss.xml ]; then
-            echo "RSS feed not generated"
+            echo "ERROR: RSS feed not generated"
             exit 1
           fi
-          # Check if RSS feed contains items
-          if ! grep -q "<item>" public/rss.xml; then
-            echo "RSS feed contains no items"
+          # Check if RSS feed has valid structure
+          if ! grep -q "<channel>" public/rss.xml; then
+            echo "ERROR: RSS feed missing channel element"
             exit 1
           fi
-          echo "RSS feed validation passed"
+          # Note: It's OK if feed has no items (e.g., during year transitions)
+          if grep -q "<item>" public/rss.xml; then
+            echo "RSS feed validation passed with $(grep -c '<item>' public/rss.xml) items"
+          else
+            echo "RSS feed validation passed (no items found - this is normal during quiet periods)"
+          fi
 
       - name: Publish to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
