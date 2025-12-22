@@ -212,10 +212,11 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
     Discover RSS feeds from the help.zscaler.com site.
     
     Strategies:
-    1. Check common RSS paths at base URL (/rss, /feed, etc.)
-    2. Extract unique path prefixes from sitemap URLs (e.g., /zia/, /zpa/, /zdx/)
-    3. Check for RSS feeds at each product/section path
-    4. Look for RSS feed links in HTML pages
+    1. Scrape the /rss directory page to find all RSS feed links
+    2. Check common RSS paths at base URL (/rss, /feed, etc.)
+    3. Extract unique path prefixes from sitemap URLs (e.g., /zia/, /zpa/, /zdx/)
+    4. Check for RSS feeds at each product/section path
+    5. Look for RSS feed links in HTML pages
     
     Uses parallel execution for improved performance.
     
@@ -223,6 +224,29 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
     """
     discovered_feeds: Set[str] = set()
     
+    # Strategy 1: Scrape the /rss directory page first (as per Zscaler_RSS_Feed_Guide.md)
+    # The main /rss URL is an HTML directory page with links to actual RSS feeds
+    print(f"[INFO] Scraping /rss directory page for RSS feed links...")
+    rss_directory_url = urljoin(base_url, "/rss")
+    try:
+        html = fetch(rss_directory_url)
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Look for links that match the RSS feed pattern: /rss-feed/{product}/...
+        for a in soup.find_all('a', href=True):
+            href = a.get('href', '')
+            # RSS feeds follow pattern: /rss-feed/{product}/release-upgrade-summary-{year}/zscaler.net
+            if '/rss-feed/' in href:
+                feed_url = urljoin(base_url, href)
+                if is_help_domain(feed_url):
+                    discovered_feeds.add(feed_url)
+                    print(f"[INFO] Found RSS feed from directory: {feed_url}")
+        
+        print(f"[INFO] Found {len(discovered_feeds)} RSS feeds from /rss directory page")
+    except Exception as e:
+        print(f"[WARN] Failed to scrape /rss directory page: {e}")
+    
+    # Strategy 2: Check common RSS paths at base URL
     def validate_rss_url(rss_url: str) -> Optional[str]:
         """
         Validate if a URL is a valid RSS feed.
@@ -248,93 +272,96 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
             pass
         return None
     
-    # 1. Check common RSS paths at base URL
-    print(f"[INFO] Checking for RSS feeds at base URL...")
-    base_rss_urls = [urljoin(base_url, rss_path) for rss_path in RSS_PATHS]
+    # Only check other common RSS paths if we didn't find feeds from /rss directory
+    if not discovered_feeds:
+        print(f"[INFO] No feeds found from /rss directory, checking common RSS paths at base URL...")
+        base_rss_urls = [urljoin(base_url, rss_path) for rss_path in RSS_PATHS]
+        
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_url = {executor.submit(validate_rss_url, url): url for url in base_rss_urls}
+            for future in as_completed(future_to_url):
+                result = future.result()
+                if result:
+                    discovered_feeds.add(result)
+                    print(f"[INFO] Found RSS feed: {result}")
     
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_url = {executor.submit(validate_rss_url, url): url for url in base_rss_urls}
-        for future in as_completed(future_to_url):
-            result = future.result()
-            if result:
-                discovered_feeds.add(result)
-                print(f"[INFO] Found RSS feed: {result}")
-    
-    # 2. Extract unique path prefixes from sitemap URLs
+    # Strategy 3: Extract unique path prefixes from sitemap URLs (only if still no feeds)
     # These represent different product sections (e.g., /zia/, /zpa/, /zdx/, etc.)
-    path_prefixes: Set[str] = set()
-    for url in sitemap_urls:
-        parsed = urlparse(url)
-        path_parts = [p for p in parsed.path.split('/') if p]
-        if path_parts:
-            # Take first 1-2 path segments as potential product/section identifier
-            prefix = '/' + path_parts[0]
-            path_prefixes.add(prefix)
-            if len(path_parts) > 1:
-                prefix2 = '/' + '/'.join(path_parts[:2])
-                path_prefixes.add(prefix2)
-    
-    print(f"[INFO] Found {len(path_prefixes)} unique path prefixes from sitemap")
-    
-    # 3. Check for RSS feeds at each product/section path (parallel)
-    section_rss_urls = []
-    for prefix in sorted(path_prefixes):
-        for rss_path in RSS_PATHS:
-            section_rss_urls.append(urljoin(base_url, prefix + rss_path))
-    
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_url = {executor.submit(validate_rss_url, url): url for url in section_rss_urls}
-        for future in as_completed(future_to_url):
-            result = future.result()
-            if result:
-                discovered_feeds.add(result)
-                print(f"[INFO] Found RSS feed: {result}")
-    
-    # 4. Look for RSS feed links in the main help page and key pages
-    key_pages = [base_url]
-    for prefix in list(path_prefixes)[:MAX_SECTION_PAGES_TO_CHECK]:
-        key_pages.append(urljoin(base_url, prefix))
-    
-    def find_rss_in_page(page_url: str) -> Set[str]:
-        """Find RSS feed links in an HTML page."""
-        feeds = set()
-        try:
-            html = fetch(page_url)
-            soup = BeautifulSoup(html, "html.parser")
-            
-            # Look for RSS link tags
-            for link in soup.find_all('link', type=['application/rss+xml', 'application/atom+xml']):
-                href = link.get('href')
-                if href:
-                    feed_url = urljoin(page_url, href)
-                    if is_help_domain(feed_url):
-                        feeds.add(feed_url)
-            
-            # Look for RSS links in HTML
-            for a in soup.find_all('a', href=True):
-                href = a.get('href', '')
-                if any(rss_hint in href.lower() for rss_hint in ['rss', 'feed', 'atom']):
-                    feed_url = urljoin(page_url, href)
-                    if is_help_domain(feed_url):
-                        feeds.add(feed_url)
-        except Exception:
-            pass
-        return feeds
-    
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_page = {
-            executor.submit(find_rss_in_page, page_url): page_url
-            for page_url in key_pages
-        }
-        for future in as_completed(future_to_page):
+    if not discovered_feeds:
+        print(f"[INFO] Still no feeds found, extracting path prefixes from sitemap...")
+        path_prefixes: Set[str] = set()
+        for url in sitemap_urls:
+            parsed = urlparse(url)
+            path_parts = [p for p in parsed.path.split('/') if p]
+            if path_parts:
+                # Take first 1-2 path segments as potential product/section identifier
+                prefix = '/' + path_parts[0]
+                path_prefixes.add(prefix)
+                if len(path_parts) > 1:
+                    prefix2 = '/' + '/'.join(path_parts[:2])
+                    path_prefixes.add(prefix2)
+        
+        print(f"[INFO] Found {len(path_prefixes)} unique path prefixes from sitemap")
+        
+        # Strategy 4: Check for RSS feeds at each product/section path (parallel)
+        section_rss_urls = []
+        for prefix in sorted(path_prefixes):
+            for rss_path in RSS_PATHS:
+                section_rss_urls.append(urljoin(base_url, prefix + rss_path))
+        
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_url = {executor.submit(validate_rss_url, url): url for url in section_rss_urls}
+            for future in as_completed(future_to_url):
+                result = future.result()
+                if result:
+                    discovered_feeds.add(result)
+                    print(f"[INFO] Found RSS feed: {result}")
+        
+        # Strategy 5: Look for RSS feed links in the main help page and key pages
+        key_pages = [base_url]
+        for prefix in list(path_prefixes)[:MAX_SECTION_PAGES_TO_CHECK]:
+            key_pages.append(urljoin(base_url, prefix))
+        
+        def find_rss_in_page(page_url: str) -> Set[str]:
+            """Find RSS feed links in an HTML page."""
+            feeds = set()
             try:
-                feeds = future.result()
-                for feed_url in feeds:
-                    if feed_url not in discovered_feeds:
-                        discovered_feeds.add(feed_url)
-                        print(f"[INFO] Found RSS feed via HTML: {feed_url}")
-            except Exception as e:
+                html = fetch(page_url)
+                soup = BeautifulSoup(html, "html.parser")
+                
+                # Look for RSS link tags
+                for link in soup.find_all('link', type=['application/rss+xml', 'application/atom+xml']):
+                    href = link.get('href')
+                    if href:
+                        feed_url = urljoin(page_url, href)
+                        if is_help_domain(feed_url):
+                            feeds.add(feed_url)
+                
+                # Look for RSS links in HTML
+                for a in soup.find_all('a', href=True):
+                    href = a.get('href', '')
+                    if any(rss_hint in href.lower() for rss_hint in ['rss', 'feed', 'atom']):
+                        feed_url = urljoin(page_url, href)
+                        if is_help_domain(feed_url):
+                            feeds.add(feed_url)
+            except Exception:
                 pass
+            return feeds
+        
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_page = {
+                executor.submit(find_rss_in_page, page_url): page_url
+                for page_url in key_pages
+            }
+            for future in as_completed(future_to_page):
+                try:
+                    feeds = future.result()
+                    for feed_url in feeds:
+                        if feed_url not in discovered_feeds:
+                            discovered_feeds.add(feed_url)
+                            print(f"[INFO] Found RSS feed via HTML: {feed_url}")
+                except Exception as e:
+                    pass
     
     return discovered_feeds
 
