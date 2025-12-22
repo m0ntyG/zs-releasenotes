@@ -22,26 +22,30 @@ sample_items = [
     {
         "title": "ZIA: Enhanced Malware Protection",
         "link": "https://help.zscaler.com/zia/enhanced-malware-protection",
+        "description": "New enhanced malware protection features for ZIA",
         "published": today,
-        "source_page": "https://help.zscaler.com/rss-feed/zia/release-upgrade-summary-2025/zscaler.net"
+        "category": "Available"
     },
     {
         "title": "ZPA: New App Connector Features",
         "link": "https://help.zscaler.com/zpa/new-app-connector",
+        "description": "Improvements to App Connector functionality",
         "published": yesterday,
-        "source_page": "https://help.zscaler.com/rss-feed/zpa/release-upgrade-summary-2025/zscaler.net"
+        "category": "Available"
     },
     {
         "title": "ZDX: Performance Monitoring Improvements",
         "link": "https://help.zscaler.com/zdx/performance-monitoring",
+        "description": "Enhanced performance monitoring capabilities",
         "published": two_days_ago,
-        "source_page": "https://help.zscaler.com/rss-feed/zdx/release-upgrade-summary-2025/zscaler.net"
+        "category": "Limited"
     },
     {
         "title": "Experience Center: Updated Dashboard",
         "link": "https://help.zscaler.com/experience-center/dashboard-update",
+        "description": "New dashboard features and improvements",
         "published": three_days_ago,
-        "source_page": "https://help.zscaler.com/rss-feed/experience-center/release-upgrade-summary-2025/zscaler.net"
+        "category": "Available"
     }
 ]
 
