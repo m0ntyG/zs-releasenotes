@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      BACKFILL_DAYS: "90"    # Time window: 90 days
+      BACKFILL_DAYS: "90" # Time window: 90 days
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,16 +24,41 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('**/uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 feedgen python-dateutil lxml
+          uv sync
 
       - name: Generate RSS
         run: |
-          python scripts/generate_rss.py
+          uv run python scripts/generate_rss.py
+
+      - name: Validate RSS feed
+        run: |
+          if [ ! -f public/rss.xml ]; then
+            echo "RSS feed not generated"
+            exit 1
+          fi
+          # Check if RSS feed contains items
+          if ! grep -q "<item>" public/rss.xml; then
+            echo "RSS feed contains no items"
+            exit 1
+          fi
+          echo "RSS feed validation passed"
 
       - name: Publish to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3

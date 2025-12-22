@@ -14,7 +14,7 @@ from io import BytesIO
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from scripts.generate_rss import (
-    discover_rss_feeds,
+    get_all_products,
     parse_rss_feed,
     build_feed,
     normalize_date
@@ -82,34 +82,23 @@ MOCK_RSS_FEED_ZPA = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 def test_discover_rss_feeds_from_directory():
-    """Test that RSS feeds are discovered from the /rss directory page."""
+    """Test that products are discovered and feed URLs are generated."""
     
-    def mock_fetch(url, timeout=30):
-        """Mock fetch function that returns appropriate content based on URL."""
-        if url == "https://help.zscaler.com/rss":
-            return MOCK_RSS_DIRECTORY_HTML
-        elif "/rss-feed/zia/" in url:
-            return MOCK_RSS_FEED_ZIA
-        elif "/rss-feed/zpa/" in url:
-            return MOCK_RSS_FEED_ZPA
-        else:
-            raise Exception(f"Unexpected URL: {url}")
+    # Test that we can get all products
+    products = get_all_products()
     
-    with patch('scripts.generate_rss.fetch', side_effect=mock_fetch):
-        feeds = discover_rss_feeds("https://help.zscaler.com", [])
-        
-        print(f"Discovered {len(feeds)} feeds:")
-        for feed in sorted(feeds):
-            print(f"  - {feed}")
-        
-        # Should find 4 RSS feeds from the directory page
-        assert len(feeds) >= 4, f"Expected at least 4 feeds, found {len(feeds)}"
-        
-        # Check for specific feeds
-        assert any("/rss-feed/zia/" in feed for feed in feeds), "ZIA feed not found"
-        assert any("/rss-feed/zpa/" in feed for feed in feeds), "ZPA feed not found"
-        assert any("/rss-feed/experience-center/" in feed for feed in feeds), "Experience Center feed not found"
-        assert any("/rss-feed/zdx/" in feed for feed in feeds), "ZDX feed not found"
+    print(f"Discovered {len(products)} products:")
+    for product_slug, domain in sorted(products):
+        print(f"  - {product_slug} ({domain})")
+    
+    # Should find at least the known products
+    assert len(products) >= 4, f"Expected at least 4 products, found {len(products)}"
+    
+    # Check for specific products
+    product_slugs = {slug for slug, domain in products}
+    assert "zia" in product_slugs, "ZIA product not found"
+    assert "zpa" in product_slugs, "ZPA product not found"
+    assert "zdx" in product_slugs, "ZDX product not found"
     
     print("✓ test_discover_rss_feeds_from_directory passed")
 
@@ -121,7 +110,12 @@ def test_parse_rss_feed():
         """Mock fetch function."""
         return MOCK_RSS_FEED_ZIA
     
-    with patch('scripts.generate_rss.fetch', side_effect=mock_fetch):
+    with patch('requests.get') as mock_get:
+        mock_response = Mock()
+        mock_response.content = MOCK_RSS_FEED_ZIA.encode('utf-8')
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
+        
         items = parse_rss_feed("https://help.zscaler.com/rss-feed/zia/release-upgrade-summary-2025/zscaler.net")
         
         print(f"Parsed {len(items)} items:")
@@ -147,12 +141,14 @@ def test_build_feed():
         {
             "title": "Test Item 1",
             "link": "https://help.zscaler.com/test1",
+            "description": "Description for test item 1",
             "published": datetime(2024, 12, 20, 10, 0, 0, tzinfo=timezone.utc),
             "source_page": "https://help.zscaler.com/rss-feed/zia/test"
         },
         {
             "title": "Test Item 2",
             "link": "https://help.zscaler.com/test2",
+            "description": "Description for test item 2",
             "published": datetime(2024, 12, 19, 10, 0, 0, tzinfo=timezone.utc),
             "source_page": "https://help.zscaler.com/rss-feed/zpa/test"
         }

@@ -58,13 +58,17 @@ The workflow runs automatically:
 ### Prerequisites
 
 ```bash
-pip install requests beautifulsoup4 feedgen python-dateutil lxml
+# Install uv package manager
+pip install uv
+
+# Install dependencies
+uv sync
 ```
 
 ### Running Locally
 
 ```bash
-python scripts/generate_rss.py
+uv run python scripts/generate_rss.py
 ```
 
 The RSS feed will be generated at `./public/rss.xml`.
@@ -72,7 +76,7 @@ The RSS feed will be generated at `./public/rss.xml`.
 ### Testing with Custom Backfill Period
 
 ```bash
-BACKFILL_DAYS=30 python scripts/generate_rss.py
+BACKFILL_DAYS=30 uv run python scripts/generate_rss.py
 ```
 
 ## Date Handling Robustness

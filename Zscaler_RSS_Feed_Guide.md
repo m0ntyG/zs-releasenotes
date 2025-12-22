@@ -89,14 +89,17 @@ The `scripts/generate_rss.py` script demonstrates a complete implementation that
 
 ### Running the Script
 ```bash
+# Install uv package manager
+pip install uv
+
 # Install dependencies
-pip install requests beautifulsoup4 feedgen python-dateutil lxml
+uv sync
 
 # Generate RSS feed
-python scripts/generate_rss.py
+uv run python scripts/generate_rss.py
 
 # Custom backfill period
-BACKFILL_DAYS=30 python scripts/generate_rss.py
+BACKFILL_DAYS=30 uv run python scripts/generate_rss.py
 ```
 
 The script outputs a comprehensive RSS feed at `public/rss.xml` containing aggregated release notes from all Zscaler products.

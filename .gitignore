@@ -1,6 +1,9 @@
 # Generated RSS feed directory
 public/
 
+# Cache directory
+.cache/
+
 # Python cache
 __pycache__/
 *.py[cod]

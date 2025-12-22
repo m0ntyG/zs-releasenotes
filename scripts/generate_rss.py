@@ -3,15 +3,14 @@
 Zscaler Help Releases RSS Generator
 
 This script collects Zscaler release notes from help.zscaler.com by:
-- Discovering and aggregating RSS feeds from all subpages (https://help.zscaler.com/rss and subdirectories)
-- Using the complete sitemap to find all potential RSS feed locations
+- Using a curated list of known RSS feed URLs for all products
 - Parsing native RSS feeds from Zscaler's help site for all products and sections
-- Falling back to page scraping if RSS feeds are unavailable
-- Supporting automatic discovery of future pages and years
+- Aggregating items from all feeds into a single RSS feed
+- Supporting automatic year updates and date filtering
 - Optionally limiting the feed with BACKFILL_DAYS (default: 14, e.g., 90)
 
 Requirements:
-  pip install requests beautifulsoup4 feedgen python-dateutil lxml
+  uv sync
 """
 
 import os
@@ -21,632 +20,468 @@ import gzip
 import time
 import requests
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree as ET
 from bs4 import BeautifulSoup
 from feedgen.feed import FeedGenerator
 from dateutil import parser as dateparser
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+import hashlib
 import threading
+import logging
+
+# Import configuration
+from rss_config import (
+    KNOWN_PRODUCTS, FALLBACK_YEARS, ENABLE_PRODUCT_DISCOVERY,
+    MAX_WORKERS, CACHE_FILE, LOG_LEVEL
+)
+
+# Set up logging
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL),
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def normalize_date(date_str: str) -> datetime:
+    """Normalize various date formats to a datetime object."""
+    try:
+        return dateparser.parse(date_str)
+    except (ValueError, TypeError):
+        logger.warning(f"Failed to parse date: {date_str}")
+        return datetime.now()
 
 BASE = "https://help.zscaler.com"
-SITEMAP_URL = f"{BASE}/sitemap.xml"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; Zscaler-Release-RSS/2.0; +https://www.zscaler.com)",
     "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8"
 }
 OUTPUT_DIR = os.path.join(os.getcwd(), "public")
 OUTPUT_PATH = os.path.join(OUTPUT_DIR, "rss.xml")
+CACHE_DIR = os.path.join(os.getcwd(), ".cache")
 
-# Relevance hints for pages from the sitemap
-# We specifically consider Release Notes and What's New paths.
-URL_INCLUDE_HINTS = [
-    "release-notes",        # typical paths for Release Notes
-    "whats-new",            # What's New overview
-    "what's-new",           # alternative spelling
-]
-# Optional: additional hints, but use with caution (too broad means noise)
-# URL_INCLUDE_HINTS += ["release", "notes"]
+MAX_WORKERS = MAX_WORKERS
 
 # Exclusion patterns (to avoid obvious non-articles)
 URL_EXCLUDE_HINTS = [
     "/tag/", "/taxonomy/", "/author/", "/search", "/attachment", "/node/",
 ]
 
-# Minimal pause between fetches (polite crawling) - only used in sequential operations
-FETCH_DELAY_SEC = 0.3
 
-# Concurrency settings for parallel operations
-MAX_WORKERS = 10  # Max concurrent threads for network operations
-
-# Common RSS feed paths to check
-RSS_PATHS = [
-    "/rss",
-    "/rss.xml",
-    "/feed",
-    "/feed.xml",
-    "/atom.xml",
-]
-
-# RSS MIME types to check
-RSS_MIME_TYPES = ['xml', 'rss', 'atom']
-
-# Maximum number of section pages to check for RSS links
-MAX_SECTION_PAGES_TO_CHECK = 10
-
-# Global session for connection pooling
-_session: Optional[requests.Session] = None
-_session_lock = threading.Lock()
+def load_discovered_products_cache() -> Set[Tuple[str, str]]:
+    """Load previously discovered products from cache."""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r') as f:
+                data = json.load(f)
+                return set(tuple(product) for product in data.get('discovered_products', []))
+        except Exception as e:
+            logger.warning(f"Failed to load product cache: {e}")
+    return set()
 
 
-def get_session() -> requests.Session:
-    """Get or create a global requests session for connection pooling. Thread-safe."""
-    global _session
-    if _session is None:
-        with _session_lock:
-            # Double-check pattern to avoid race condition
-            if _session is None:
-                _session = requests.Session()
-                adapter = requests.adapters.HTTPAdapter(
-                    pool_connections=MAX_WORKERS,
-                    pool_maxsize=MAX_WORKERS,
-                    max_retries=3,
-                    pool_block=False  # Raise exception instead of blocking when pool is exhausted
-                )
-                _session.mount('http://', adapter)
-                _session.mount('https://', adapter)
-                _session.headers.update(HEADERS)
-    return _session
-
-
-def fetch(url: str, timeout: int = 30) -> str:
-    session = get_session()
-    r = session.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.text
-
-
-def fetch_bytes(url: str, timeout: int = 30) -> bytes:
-    session = get_session()
-    r = session.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.content
-
-
-def maybe_decompress_sitemap(url: str, content: bytes) -> bytes:
-    """
-    Decompress if URL ends with .gz or content is actually gzipped.
-    """
+def save_discovered_products_cache(discovered_products: Set[Tuple[str, str]]):
+    """Save discovered products to cache."""
+    cache_dir = os.path.dirname(CACHE_FILE)
+    os.makedirs(cache_dir, exist_ok=True)
     try:
-        # If it looks like gzip, try to decompress
-        if url.lower().endswith(".gz"):
-            with gzip.GzipFile(fileobj=io.BytesIO(content)) as gz:
-                return gz.read()
-        # Some servers send unmarked gzip data; heuristic attempt
-        if content[:2] == b"\x1f\x8b":
-            with gzip.GzipFile(fileobj=io.BytesIO(content)) as gz:
-                return gz.read()
+        data = {
+            'discovered_products': list(discovered_products),
+            'last_updated': datetime.now().isoformat()
+        }
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
     except Exception as e:
-        print(f"[WARN] Gzip decompression failed for {url}: {e}")
-    return content
+        logger.warning(f"Failed to save product cache: {e}")
 
 
-def is_help_domain(url: str) -> bool:
+def get_all_products() -> List[Tuple[str, str]]:
+    """Get all products including known and previously discovered ones."""
+    all_products = list(KNOWN_PRODUCTS)
+
+    # Load cached discovered products
+    cached_products = load_discovered_products_cache()
+    all_products.extend(cached_products)
+
+    return all_products
+
+
+def discover_new_products() -> Set[Tuple[str, str]]:
+    """
+    Discover new Zscaler products by scraping the RSS directory page.
+    Includes rate limiting, validation, and better error handling.
+    """
+    new_products = set()
+
+    if not ENABLE_PRODUCT_DISCOVERY:
+        logger.info("Product discovery is disabled")
+        return new_products
+
     try:
-        p = urlparse(url)
-        return p.scheme in ("http", "https") and p.netloc.endswith("help.zscaler.com")
+        logger.info("Discovering new products from RSS directory...")
+
+        # Add delay to be respectful to the server
+        time.sleep(1)
+
+        response = requests.get(f"{BASE}/rss", headers=HEADERS, timeout=30)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Look for RSS feed links in the directory with multiple patterns
+        feed_patterns = [
+            r'/rss-feed/[^/]+/release-upgrade-summary-\d+/[^/]+',
+            r'/rss-feed/[^/]+/release-notes-\d+/[^/]+',
+            r'/feeds/[^/]+/release-\d+/[^/]+'
+        ]
+
+        discovered_links = set()
+
+        for pattern in feed_patterns:
+            feed_links = soup.find_all('a', href=re.compile(pattern))
+            for link in feed_links:
+                href = link.get('href', '').strip()
+                if href and not href.startswith('http'):
+                    href = BASE + href
+                discovered_links.add(href)
+
+        # Also look for links in RSS autodiscovery tags
+        rss_links = soup.find_all('link', {'type': re.compile(r'application/(rss|atom)\+xml')})
+        for link in rss_links:
+            href = link.get('href', '').strip()
+            if href and '/rss-feed/' in href:
+                if not href.startswith('http'):
+                    href = BASE + href
+                discovered_links.add(href)
+
+        known_product_slugs = {product for product, _ in get_all_products()}
+
+        for href in discovered_links:
+            # Try multiple regex patterns to extract product info
+            patterns = [
+                r'/rss-feed/([^/]+)/release-upgrade-summary-(\d+)/([^/]+)',
+                r'/rss-feed/([^/]+)/release-notes-(\d+)/([^/]+)',
+                r'/feeds/([^/]+)/release-(\d+)/([^/]+)'
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, href)
+                if match:
+                    product_slug, year, domain = match.groups()
+                    if product_slug not in known_product_slugs:
+                        # Validate the product by checking if the feed URL exists
+                        if validate_product_feed(product_slug, domain, year):
+                            new_products.add((product_slug, domain))
+                            logger.info(f"Discovered and validated new product: {product_slug} ({domain})")
+                    break
+
+        if new_products:
+            logger.info(f"Successfully discovered {len(new_products)} new products")
+            # Update cache with new discoveries
+            existing_cache = load_discovered_products_cache()
+            updated_cache = existing_cache.union(new_products)
+            save_discovered_products_cache(updated_cache)
+        else:
+            logger.info("No new products discovered")
+
+    except requests.RequestException as e:
+        logger.warning(f"Network error during product discovery: {e}")
+    except Exception as e:
+        logger.warning(f"Unexpected error during product discovery: {e}")
+
+    return new_products
+
+
+def validate_product_feed(product_slug: str, domain: str, year: str) -> bool:
+    """
+    Validate that a discovered product feed actually exists and returns valid RSS.
+    """
+    try:
+        url = f"https://help.zscaler.com/rss-feed/{product_slug}/release-upgrade-summary-{year}/{domain}"
+        response = requests.head(url, headers=HEADERS, timeout=5)
+
+        if response.status_code == 200:
+            # Do a quick content check to ensure it's actually RSS
+            content_response = requests.get(url, headers=HEADERS, timeout=10)
+            if content_response.status_code == 200:
+                content = content_response.text.lower()
+                if '<rss' in content or '<feed' in content:
+                    return True
+
+        return False
     except Exception:
         return False
 
 
-def parse_sitemap(url: str) -> List[str]:
+def get_feed_urls_for_year(year: int) -> Set[str]:
     """
-    Loads sitemap.xml or a sub-sitemap. Supports sitemapindex recursively and .xml.gz.
-    Returns a flat list of all <loc> URLs.
-    Uses parallel fetching for nested sitemaps.
+    Generate RSS feed URLs for a specific year using all known and discovered products.
     """
-    try:
-        raw = fetch_bytes(url)
-        content = maybe_decompress_sitemap(url, raw)
-    except Exception as e:
-        print(f"[WARN] Failed to fetch sitemap: {url} -> {e}")
-        return []
+    feed_urls = set()
+    products_to_check = get_all_products()
 
-    try:
-        root = ET.fromstring(content)
-    except Exception as e:
-        print(f"[WARN] Failed to parse sitemap XML: {url} -> {e}")
-        return []
+    # Add newly discovered products if enabled
+    if ENABLE_PRODUCT_DISCOVERY:
+        new_products = discover_new_products()
+        products_to_check.extend(new_products)
 
-    def localname(tag: str) -> str:
-        return tag.split("}")[-1]
+    for product, domain in products_to_check:
+        url = f"https://help.zscaler.com/rss-feed/{product}/release-upgrade-summary-{year}/{domain}"
+        feed_urls.add(url)
 
-    urls: List[str] = []
-
-    tag = localname(root.tag)
-    if tag == "sitemapindex":
-        # Extract all nested sitemap URLs
-        nested_sitemaps = []
-        for sm in root:
-            if localname(sm.tag) != "sitemap":
-                continue
-            loc_el = next((c for c in sm if localname(c.tag) == "loc"), None)
-            if loc_el is not None and loc_el.text:
-                nested_sitemaps.append(loc_el.text.strip())
-        
-        # Parallel fetch of nested sitemaps
-        if nested_sitemaps:
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                future_to_url = {
-                    executor.submit(parse_sitemap, sitemap_url): sitemap_url
-                    for sitemap_url in nested_sitemaps
-                }
-                for future in as_completed(future_to_url):
-                    try:
-                        urls.extend(future.result())
-                    except Exception as e:
-                        sitemap_url = future_to_url[future]
-                        print(f"[WARN] Error parsing nested sitemap {sitemap_url}: {e}")
-        return urls
-
-    if tag == "urlset":
-        for u in root:
-            if localname(u.tag) != "url":
-                continue
-            loc_el = next((c for c in u if localname(c.tag) == "loc"), None)
-            if loc_el is not None and loc_el.text:
-                urls.append(loc_el.text.strip())
-
-    # Generic fallback: collect all <loc>
-    if not urls:
-        for el in root.iter():
-            if localname(el.tag) == "loc" and el.text:
-                urls.append(el.text.strip())
-
-    return urls
+    return feed_urls
 
 
-def discover_feeds_from_directory(directory_url: str) -> Set[str]:
+def get_optimal_feed_urls() -> Set[str]:
     """
-    Since the directory page is JS-rendered, return a list of known RSS feed URLs.
-    In a real implementation, use a headless browser to scrape the page.
-    
-<<<<<<< HEAD
-    Strategies:
-    1. Scrape the /rss directory page to find all RSS feed links
-    2. Check common RSS paths at base URL (/rss, /feed, etc.)
-    3. Extract unique path prefixes from sitemap URLs (e.g., /zia/, /zpa/, /zdx/)
-    4. Check for RSS feeds at each product/section path
-    5. Look for RSS feed links in HTML pages
-    
-    Uses parallel execution for improved performance.
-    
-    Returns a set of discovered RSS feed URLs.
-=======
-    Returns a set of known RSS feed URLs.
->>>>>>> 40c33ad (Refactor code structure for improved readability and maintainability)
+    Get RSS feed URLs with intelligent year selection and product discovery.
+    Supports multiple years during transitions and automatic product discovery.
     """
-    # Known RSS feeds from the directory (2025 releases)
-    known_feeds = {
-        "https://help.zscaler.com/rss-feed/zia/release-upgrade-summary-2025/zscaler.net",
-        "https://help.zscaler.com/rss-feed/zpa/release-upgrade-summary-2025/private.zscaler.com",
-        "https://help.zscaler.com/rss-feed/zdx/release-upgrade-summary-2025/zdxcloud.net",
-        "https://help.zscaler.com/rss-feed/zscaler-client-connector/release-upgrade-summary-2025/mobile.zscaler.net",
-        "https://help.zscaler.com/rss-feed/cloud-branch-connector/release-upgrade-summary-2025/connector.zscaler.net",
-        "https://help.zscaler.com/rss-feed/dspm/release-upgrade-summary-2025/app.zsdpc.net",
-        "https://help.zscaler.com/rss-feed/workflow-automation/release-upgrade-summary-2025/Zscaler-Automation",
-        "https://help.zscaler.com/rss-feed/business-insights/release-upgrade-summary-2025/zscaleranalytics.net",
-        "https://help.zscaler.com/rss-feed/zidentity/release-upgrade-summary-2025/zslogin.net",
-        "https://help.zscaler.com/rss-feed/risk360/release-upgrade-summary-2025/zscalerrisk.net",
-        "https://help.zscaler.com/rss-feed/deception/release-upgrade-summary-2025/illusionblack.com",
-        "https://help.zscaler.com/rss-feed/itdr/release-upgrade-summary-2025/illusionblack.com",
-        "https://help.zscaler.com/rss-feed/breach-predictor/release-upgrade-summary-2025/zscalerbp.net",
-        "https://help.zscaler.com/rss-feed/zero-trust-branch/release-upgrade-summary-2025/goairgap.com",
-        "https://help.zscaler.com/rss-feed/zscaler-cellular/release-upgrade-summary-2025/admin.ztsim.com",
-        "https://help.zscaler.com/rss-feed/aem/release-upgrade-summary-2025/app.avalor.io",
-        "https://help.zscaler.com/rss-feed/zsdk/release-upgrade-summary-2025/ZSDK",
-        "https://help.zscaler.com/rss-feed/unified/release-upgrade-summary-2025/console.zscaler.com",
-    }
-    
-<<<<<<< HEAD
-    # Strategy 1: Scrape the /rss directory page first (as per Zscaler_RSS_Feed_Guide.md)
-    # The main /rss URL is an HTML directory page with links to actual RSS feeds
-    print(f"[INFO] Scraping /rss directory page for RSS feed links...")
-    rss_directory_url = urljoin(base_url, "/rss")
-    try:
-        html = fetch(rss_directory_url)
-        soup = BeautifulSoup(html, "html.parser")
-        
-        # Look for links that match the RSS feed pattern: /rss-feed/{product}/...
-        for a in soup.find_all('a', href=True):
-            href = a.get('href', '')
-            # RSS feeds follow pattern: /rss-feed/{product}/release-upgrade-summary-{year}/zscaler.net
-            if '/rss-feed/' in href:
-                feed_url = urljoin(base_url, href)
-                if is_help_domain(feed_url):
-                    discovered_feeds.add(feed_url)
-                    print(f"[INFO] Found RSS feed from directory: {feed_url}")
-        
-        print(f"[INFO] Found {len(discovered_feeds)} RSS feeds from /rss directory page")
-    except Exception as e:
-        print(f"[WARN] Failed to scrape /rss directory page: {e}")
-    
-    # Strategy 2: Check common RSS paths at base URL
-    def validate_rss_url(rss_url: str) -> Optional[str]:
-        """
-        Validate if a URL is a valid RSS feed.
-        Returns the URL if valid, None otherwise.
-        """
-        try:
-            session = get_session()
-            response = session.head(rss_url, timeout=10, allow_redirects=True)
-            if response.status_code == 200:
-                # Verify it's actually an RSS/XML feed
-                content_type = response.headers.get('content-type', '').lower()
-                if any(mime_type in content_type for mime_type in RSS_MIME_TYPES):
-                    return rss_url
-                else:
-                    # Try GET to check content
-                    try:
-                        content = fetch(rss_url)
-                        if '<rss' in content.lower() or '<feed' in content.lower():
-                            return rss_url
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        return None
-    
-    # Only check other common RSS paths if we didn't find feeds from /rss directory
-    if not discovered_feeds:
-        print(f"[INFO] No feeds found from /rss directory, checking common RSS paths at base URL...")
-        base_rss_urls = [urljoin(base_url, rss_path) for rss_path in RSS_PATHS]
-        
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_url = {executor.submit(validate_rss_url, url): url for url in base_rss_urls}
-            for future in as_completed(future_to_url):
-                result = future.result()
-                if result:
-                    discovered_feeds.add(result)
-                    print(f"[INFO] Found RSS feed: {result}")
-    
-    # Strategy 3: Extract unique path prefixes from sitemap URLs (only if still no feeds)
-    # These represent different product sections (e.g., /zia/, /zpa/, /zdx/, etc.)
-    if not discovered_feeds:
-        print(f"[INFO] Still no feeds found, extracting path prefixes from sitemap...")
-        path_prefixes: Set[str] = set()
-        for url in sitemap_urls:
-            parsed = urlparse(url)
-            path_parts = [p for p in parsed.path.split('/') if p]
-            if path_parts:
-                # Take first 1-2 path segments as potential product/section identifier
-                prefix = '/' + path_parts[0]
-                path_prefixes.add(prefix)
-                if len(path_parts) > 1:
-                    prefix2 = '/' + '/'.join(path_parts[:2])
-                    path_prefixes.add(prefix2)
-        
-        print(f"[INFO] Found {len(path_prefixes)} unique path prefixes from sitemap")
-        
-        # Strategy 4: Check for RSS feeds at each product/section path (parallel)
-        section_rss_urls = []
-        for prefix in sorted(path_prefixes):
-            for rss_path in RSS_PATHS:
-                section_rss_urls.append(urljoin(base_url, prefix + rss_path))
-        
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_url = {executor.submit(validate_rss_url, url): url for url in section_rss_urls}
-            for future in as_completed(future_to_url):
-                result = future.result()
-                if result:
-                    discovered_feeds.add(result)
-                    print(f"[INFO] Found RSS feed: {result}")
-        
-        # Strategy 5: Look for RSS feed links in the main help page and key pages
-        key_pages = [base_url]
-        for prefix in list(path_prefixes)[:MAX_SECTION_PAGES_TO_CHECK]:
-            key_pages.append(urljoin(base_url, prefix))
-        
-        def find_rss_in_page(page_url: str) -> Set[str]:
-            """Find RSS feed links in an HTML page."""
-            feeds = set()
+    current_year = datetime.now().year
+    years_to_check = [current_year]
+
+    # Add fallback years if enabled
+    if FALLBACK_YEARS:
+        years_to_check.extend(current_year + offset for offset in FALLBACK_YEARS)
+
+    # Remove duplicates and sort
+    years_to_check = sorted(set(years_to_check))
+
+    all_feed_urls = set()
+
+    for year in years_to_check:
+        logger.info(f"Checking RSS feeds for year {year}...")
+        year_feed_urls = get_feed_urls_for_year(year)
+
+        if year_feed_urls:
+            # Quick validation: check if any feeds in this year are accessible
+            sample_url = next(iter(year_feed_urls))
             try:
-                html = fetch(page_url)
-                soup = BeautifulSoup(html, "html.parser")
-                
-                # Look for RSS link tags
-                for link in soup.find_all('link', type=['application/rss+xml', 'application/atom+xml']):
-                    href = link.get('href')
-                    if href:
-                        feed_url = urljoin(page_url, href)
-                        if is_help_domain(feed_url):
-                            feeds.add(feed_url)
-                
-                # Look for RSS links in HTML
-                for a in soup.find_all('a', href=True):
-                    href = a.get('href', '')
-                    if any(rss_hint in href.lower() for rss_hint in ['rss', 'feed', 'atom']):
-                        feed_url = urljoin(page_url, href)
-                        if is_help_domain(feed_url):
-                            feeds.add(feed_url)
-            except Exception:
-                pass
-            return feeds
-        
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_page = {
-                executor.submit(find_rss_in_page, page_url): page_url
-                for page_url in key_pages
-            }
-            for future in as_completed(future_to_page):
-                try:
-                    feeds = future.result()
-                    for feed_url in feeds:
-                        if feed_url not in discovered_feeds:
-                            discovered_feeds.add(feed_url)
-                            print(f"[INFO] Found RSS feed via HTML: {feed_url}")
-                except Exception as e:
-                    pass
-    
-    return discovered_feeds
-=======
-    print(f"[INFO] Using {len(known_feeds)} known RSS feeds")
-    for feed in sorted(known_feeds):
-        print(f"[INFO] Known RSS feed: {feed}")
-    
-    return known_feeds
->>>>>>> 40c33ad (Refactor code structure for improved readability and maintainability)
+                response = requests.head(sample_url, headers=HEADERS, timeout=10)
+                if response.status_code == 200:
+                    logger.info(f"Found active feeds for year {year} ({len(year_feed_urls)} feeds)")
+                    all_feed_urls.update(year_feed_urls)
+                    # If this is the current year and we found feeds, prioritize it
+                    if year == current_year:
+                        break
+                else:
+                    logger.info(f"No active feeds found for year {year} (HTTP {response.status_code})")
+            except Exception as e:
+                logger.info(f"Could not verify feeds for year {year}: {e}")
+        else:
+            logger.info(f"No feed URLs generated for year {year}")
+
+    if not all_feed_urls:
+        logger.warning("No active feeds found for any year, using current year as fallback")
+        all_feed_urls = get_feed_urls_for_year(current_year)
+
+    return all_feed_urls
+
+
+def validate_feed_urls(feed_urls: Set[str]) -> Dict[str, bool]:
+    """
+    Validate which feed URLs are accessible and return their status.
+    """
+    validation_results = {}
+
+    def check_feed(url):
+        try:
+            response = requests.head(url, headers=HEADERS, timeout=5)
+            return url, response.status_code == 200
+        except Exception:
+            return url, False
+
+    logger.info("Validating feed URLs...")
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(feed_urls))) as executor:
+        futures = [executor.submit(check_feed, url) for url in feed_urls]
+        for future in as_completed(futures):
+            url, is_valid = future.result()
+            validation_results[url] = is_valid
+
+    valid_count = sum(validation_results.values())
+    logger.info(f"Feed validation: {valid_count}/{len(feed_urls)} URLs are accessible")
+
+    return validation_results
+
+
+def get_known_feeds() -> Set[str]:
+    """
+    Return RSS feed URLs with automatic year selection and product discovery.
+    Uses current year with fallback logic and discovers new products.
+    """
+    feed_urls = get_optimal_feed_urls()
+    logger.info(f"Using {len(feed_urls)} RSS feeds")
+    return feed_urls
 
 
 def parse_rss_feed(feed_url: str) -> List[Dict]:
     """
     Parse an RSS or Atom feed and extract items.
-    
-    Returns a list of items with: title, link, published, description, category, source_page
+
+    Returns a list of items with: title, link, published, source_page
     """
     items: List[Dict] = []
-    
     try:
-        content = fetch(feed_url)
-        
-        # Validate content is XML before parsing
-        if not content or not isinstance(content, str):
-            print(f"[WARN] Invalid content type from {feed_url}")
-            return items
-        
-        # Check if content looks like XML
-        if not ('<rss' in content.lower() or '<feed' in content.lower() or '<?xml' in content.lower()):
-            print(f"[WARN] Content from {feed_url} doesn't appear to be XML/RSS")
-            return items
-        
-        root = ET.fromstring(content.encode('utf-8'))
-        
-        def localname(tag: str) -> str:
-            return tag.split("}")[-1]
-        
-        root_tag = localname(root.tag)
-        
-        # Handle RSS 2.0
-        if root_tag == "rss":
-            for channel in root:
-                if localname(channel.tag) != "channel":
-                    continue
-                for item in channel:
-                    if localname(item.tag) != "item":
-                        continue
-                    
-                    title = ""
-                    link = ""
-                    pub_date = None
-                    description = ""
-                    category = ""
-                    
-                    for elem in item:
-                        tag = localname(elem.tag)
-                        if tag == "title" and elem.text:
-                            title = elem.text.strip()
-                        elif tag == "link" and elem.text:
-                            link = elem.text.strip()
-                        elif tag == "pubDate" and elem.text:
-                            pub_date = normalize_date(elem.text)
-                        elif tag == "description" and elem.text:
-                            description = elem.text.strip()
-                        elif tag == "category" and elem.text:
-                            category = elem.text.strip()
-                    
-                    if title and link:
-                        items.append({
-                            "title": title,
-                            "link": link,
-                            "published": pub_date or datetime.now(timezone.utc),
-                            "description": description,
-                            "category": category,
-                            "source_page": feed_url
-                        })
-        
-        # Handle Atom (similarly, but Atom has different tags)
-        elif root_tag == "feed":
-            for entry in root:
-                if localname(entry.tag) != "entry":
-                    continue
-                
-                title = ""
-                link = ""
-                pub_date = None
-                description = ""
-                category = ""
-                
-                for elem in entry:
-                    tag = localname(elem.tag)
-                    if tag == "title" and elem.text:
-                        title = elem.text.strip()
-                    elif tag == "link":
-                        href = elem.get("href")
-                        if href:
-                            link = href.strip()
-                    elif tag in ["published", "updated"] and elem.text:
-                        pub_date = normalize_date(elem.text)
-                    elif tag == "summary" and elem.text:
-                        description = elem.text.strip()
-                    elif tag == "category":
-                        term = elem.get("term")
-                        if term:
-                            category = term.strip()
-                
-                if title and link:
-                    items.append({
-                        "title": title,
-                        "link": link,
-                        "published": pub_date or datetime.now(timezone.utc),
-                        "description": description,
-                        "category": category,
-                        "source_page": feed_url
-                    })
-        
-        print(f"[INFO] Parsed {len(items)} items from RSS feed: {feed_url}")
-        
+        response = requests.get(feed_url, headers=HEADERS, timeout=30)
+        response.raise_for_status()
+
+        # Try to parse as RSS/Atom
+        root = ET.fromstring(response.content)
+
+        # Handle both RSS 2.0 and Atom formats
+        if root.tag == 'rss':
+            # RSS 2.0 format
+            channel = root.find('channel')
+            if channel is not None:
+                for item_elem in channel.findall('item'):
+                    item = parse_rss_item(item_elem, feed_url)
+                    if item:
+                        items.append(item)
+        elif root.tag == '{http://www.w3.org/2005/Atom}feed':
+            # Atom format
+            for entry in root.findall('{http://www.w3.org/2005/Atom}entry'):
+                item = parse_atom_entry(entry, feed_url)
+                if item:
+                    items.append(item)
+
+        logger.info(f"Parsed {len(items)} items from RSS feed: {feed_url}")
+
     except Exception as e:
-        print(f"[WARN] Failed to parse RSS feed {feed_url}: {e}")
-    
+        logger.error(f"Error parsing RSS feed {feed_url}: {e}")
+
     return items
 
 
-def select_relevant_urls(all_urls: List[str]) -> List[str]:
-    """
-    Filters URLs from the sitemap to relevant pages:
-    - Domain help.zscaler.com
-    - Contains hints for Release Notes or What's New
-    - Excludes obvious non-articles
-    """
-    relevant: Set[str] = set()
-    for u in all_urls:
-        if not is_help_domain(u):
-            continue
-        path = urlparse(u).path.lower()
-        if any(excl in path for excl in URL_EXCLUDE_HINTS):
-            continue
-        if any(hint in path for hint in URL_INCLUDE_HINTS):
-            relevant.add(u)
-    return sorted(relevant)
-
-
-def normalize_date(date_text: Optional[str]) -> datetime:
-    """
-    Parse date string and normalize to UTC timezone.
-    Returns current UTC time if parsing fails.
-    Handles year transitions robustly by always using explicit year in parsed dates.
-    """
-    if not date_text:
-        return datetime.now(timezone.utc)
+def parse_rss_item(item_elem, source_url: str) -> Optional[Dict]:
+    """Parse an RSS 2.0 item element."""
     try:
-        dt = dateparser.parse(date_text)
-        if not dt:
-            return datetime.now(timezone.utc)
-        if not dt.tzinfo:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        return datetime.now(timezone.utc)
+        title = item_elem.find('title')
+        link = item_elem.find('link')
+        description = item_elem.find('description')
+        pub_date = item_elem.find('pubDate')
+        category = item_elem.find('category')
+
+        if title is None or link is None:
+            return None
+
+        # Extract text content
+        title_text = title.text.strip() if title is not None and title.text else ""
+        link_text = link.text.strip() if link is not None and link.text else ""
+        desc_text = description.text.strip() if description is not None and description.text else ""
+        category_text = category.text.strip() if category is not None and category.text else ""
+
+        # Parse publication date
+        published = None
+        if pub_date is not None and pub_date.text:
+            try:
+                published = dateparser.parse(pub_date.text)
+                if published.tzinfo is None:
+                    published = published.replace(tzinfo=timezone.utc)
+            except Exception as e:
+                logger.warning(f"Could not parse date '{pub_date.text}': {e}")
+
+        return {
+            'title': title_text,
+            'link': link_text,
+            'description': desc_text,
+            'published': published,
+            'category': category_text,
+            'source_page': source_url
+        }
+    except Exception as e:
+        logger.error(f"Error parsing RSS item: {e}")
+        return None
 
 
-def extract_date_from_soup(soup: BeautifulSoup) -> datetime:
-    """
-    Extract publication date from HTML page.
-    Tries multiple strategies:
-    1. Structured metadata (meta tags)
-    2. HTML5 time element
-    3. Visible date text
-    
-    Returns current UTC time as fallback.
-    """
-    # 1) Structured metadata
-    meta_selectors = [
-        ('meta[property="article:published_time"]', "content"),
-        ('meta[name="article:published_time"]', "content"),
-        ('meta[property="og:updated_time"]', "content"),
-        ('meta[name="date"]', "content"),
-    ]
-    for css, attr in meta_selectors:
-        el = soup.select_one(css)
-        if el and el.get(attr):
-            return normalize_date(el.get(attr))
+def parse_atom_entry(entry_elem, source_url: str) -> Optional[Dict]:
+    """Parse an Atom entry element."""
+    try:
+        title = entry_elem.find('{http://www.w3.org/2005/Atom}title')
+        link = entry_elem.find('{http://www.w3.org/2005/Atom}link')
+        summary = entry_elem.find('{http://www.w3.org/2005/Atom}summary')
+        content = entry_elem.find('{http://www.w3.org/2005/Atom}content')
+        published = entry_elem.find('{http://www.w3.org/2005/Atom}published')
+        updated = entry_elem.find('{http://www.w3.org/2005/Atom}updated')
+        category = entry_elem.find('{http://www.w3.org/2005/Atom}category')
 
-    # 2) time tag
-    time_el = soup.find("time")
-    if time_el:
-        if time_el.get("datetime"):
-            return normalize_date(time_el.get("datetime"))
-        txt = time_el.get_text(strip=True)
-        if txt:
-            return normalize_date(txt)
+        if not title:
+            return None
 
-    # 3) Visible date texts with explicit 4-digit year requirement
-    for c in soup.select("*"):
-        t = c.get_text(" ", strip=True)
-        tl = t.lower()
-        if any(k in tl for k in ["published", "updated", "release", "date", "released", "last updated"]):
-            # Match date patterns that include 4-digit years:
-            # - "31 December 2024" (day month year)
-            # - "December 31, 2024" (month day, year)
-            # - "2024-12-31" (ISO format)
-            m = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\w+\s+\d{1,2},\s*\d{4}|\d{4}-\d{2}-\d{2})", t)
-            if m:
-                return normalize_date(m.group(1))
+        # Extract title
+        title_text = title.text.strip() if title.text else ""
 
-    # Fallback: now
-    return datetime.now(timezone.utc)
+        # Extract link
+        link_href = ""
+        if link is not None:
+            link_href = link.get('href', '')
 
+        # Extract description (prefer content over summary)
+        desc_text = ""
+        if content is not None and content.text:
+            desc_text = content.text.strip()
+        elif summary is not None and summary.text:
+            desc_text = summary.text.strip()
 
-def extract_title(soup: BeautifulSoup, default: str) -> str:
-    """
-    Extract page title from HTML.
-    Prefers H1, then <title>, then fallback.
-    """
-    h1 = soup.find("h1")
-    if h1 and h1.get_text(strip=True):
-        return h1.get_text(strip=True)
-    if soup.title and soup.title.get_text(strip=True):
-        return soup.title.get_text(strip=True)
-    return default
+        # Extract category
+        category_text = ""
+        if category is not None:
+            category_text = category.get('term', '')
+
+        # Parse publication date (prefer published over updated)
+        published_date = None
+        date_elem = published or updated
+        if date_elem is not None and date_elem.text:
+            try:
+                published_date = dateparser.parse(date_elem.text)
+                if published_date.tzinfo is None:
+                    published_date = published_date.replace(tzinfo=timezone.utc)
+            except Exception as e:
+                logger.warning(f"Could not parse date '{date_elem.text}': {e}")
+
+        return {
+            'title': title_text,
+            'link': link_href,
+            'description': desc_text,
+            'published': published_date,
+            'category': category_text,
+            'source_page': source_url
+        }
+    except Exception as e:
+        logger.error(f"Error parsing Atom entry: {e}")
+        return None
 
 
 def build_feed(items: List[Dict]) -> bytes:
-    """
-    Build RSS feed from list of items.
-    Each item should have: title, link, published, description, category, source_page
-    """
+    """Build RSS feed from aggregated items."""
     fg = FeedGenerator()
-    fg.id(BASE)
     fg.title("Zscaler Releases (help.zscaler.com)")
-    fg.link(href=BASE, rel='alternate')
-    fg.link(href=urljoin(BASE, "/rss.xml"), rel='self')
     fg.description("Automatically generated feed for new Zscaler Release Notes across all products.")
-    fg.language('en')
+    fg.link(href="https://help.zscaler.com/rss.xml", rel="self")
+    fg.language("en")
+    fg.lastBuildDate(datetime.now(timezone.utc))
 
-    items_sorted = sorted(items, key=lambda x: x["published"], reverse=True)
-    for it in items_sorted:
+    for item in items:
         fe = fg.add_entry()
-        fe.id(it["link"])
-        fe.title(it["title"])
-        fe.link(href=it["link"])
-        fe.published(it["published"])
-        fe.updated(it["published"])
-        if it.get("description"):
-            fe.description(it["description"])
-        if it.get("category"):
-            fe.category(term=it["category"])
-        fe.summary(f"{it['title']} – Source: {it['source_page']}")
+        fe.title(item['title'])
+        fe.link(href=item['link'])
+        fe.description(item['description'])
+        if item.get('published'):
+            fe.pubDate(item['published'])
+        if item.get('category'):
+            fe.category(term=item['category'])
+
     return fg.rss_str(pretty=True)
 
 
 def main():
     """
     Main function to generate RSS feed.
-    
+
     Process:
-    1. Scrape the RSS directory page to discover all feed URLs
-    2. Parse all discovered RSS feeds and aggregate items (parallel)
+    1. Get known RSS feed URLs for all Zscaler products
+    2. Parse all RSS feeds and aggregate items (parallel)
     3. Apply time window filter (BACKFILL_DAYS)
     4. Deduplicate by link
     5. Build and write aggregated RSS feed
@@ -656,58 +491,63 @@ def main():
     BACKFILL_DAYS = int(os.getenv("BACKFILL_DAYS", "14"))
     cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
 
-    # 1) Scrape the RSS directory page to discover feed URLs
-    print("[INFO] Step 1: Scraping RSS directory to discover feed URLs...")
-    directory_url = urljoin(BASE, "/rss")
-    discovered_feeds = discover_feeds_from_directory(directory_url)
-    print(f"[INFO] Total RSS feeds discovered: {len(discovered_feeds)}")
-    
-    aggregated: List[Dict] = []
-    
-    # 2) Parse all discovered RSS feeds (parallel)
-    if discovered_feeds:
-        print("[INFO] Step 2: Parsing discovered RSS feeds in parallel...")
-        
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_feed = {
-                executor.submit(parse_rss_feed, feed_url): feed_url
-                for feed_url in discovered_feeds
-            }
-            for future in as_completed(future_to_feed):
-                feed_url = future_to_feed[future]
-                try:
-                    items = future.result()
-                    aggregated.extend(items)
-                except Exception as e:
-                    print(f"[WARN] Error parsing RSS feed {feed_url}: {e}")
-        
-        print(f"[INFO] Total items from RSS feeds: {len(aggregated)}")
-    else:
-        print("[WARN] No RSS feeds discovered from directory")
-    
-    print(f"[INFO] Total extracted items: {len(aggregated)}")
+    # 1) Get RSS feed URLs with year fallback and product discovery
+    logger.info("Step 1: Getting RSS feed URLs with automatic discovery...")
+    discovered_feeds = get_known_feeds()
+    logger.info(f"Total RSS feeds: {len(discovered_feeds)}")
 
-    # 3) Apply time window
-    window_items = [it for it in aggregated if it["published"] >= cutoff]
-    print(f"[INFO] Step 3: Items within last {BACKFILL_DAYS} days: {len(window_items)}")
+    # Optional: Validate feed URLs (can be disabled for performance)
+    if os.getenv("VALIDATE_FEEDS", "false").lower() == "true":
+        logger.info("Step 1.5: Validating feed URLs...")
+        validation_results = validate_feed_urls(discovered_feeds)
+        valid_feeds = {url for url, is_valid in validation_results.items() if is_valid}
+        if len(valid_feeds) < len(discovered_feeds):
+            logger.warning(f"Some feeds are not accessible: {len(discovered_feeds) - len(valid_feeds)} failed")
+            discovered_feeds = valid_feeds
+
+    aggregated: List[Dict] = []
+
+    # 2) Parse all RSS feeds (parallel)
+    logger.info("Step 2: Parsing RSS feeds in parallel...")
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_feed = {
+            executor.submit(parse_rss_feed, feed_url): feed_url
+            for feed_url in discovered_feeds
+        }
+        for future in as_completed(future_to_feed):
+            feed_url = future_to_feed[future]
+            try:
+                items = future.result()
+                aggregated.extend(items)
+            except Exception as e:
+                logger.error(f"Error parsing RSS feed {feed_url}: {e}")
+
+    logger.info(f"Total items from RSS feeds: {len(aggregated)}")
+
+    # 3) Apply time window filter
+    logger.info(f"Step 3: Filtering items within last {BACKFILL_DAYS} days...")
+    filtered = [item for item in aggregated if item.get('published') and item['published'] > cutoff]
+    logger.info(f"Items within time window: {len(filtered)}")
 
     # 4) Deduplicate by link
-    final: List[Dict] = []
-    seen = set()
-    for it in window_items:
-        if it["link"] in seen:
-            continue
-        seen.add(it["link"])
-        final.append(it)
-    
-    print(f"[INFO] Step 4: Items after deduplication: {len(final)}")
+    logger.info("Step 4: Deduplicating by link...")
+    seen_links = set()
+    deduplicated = []
+    for item in sorted(filtered, key=lambda x: x.get('published', datetime.min.replace(tzinfo=timezone.utc)), reverse=True):
+        link = item.get('link', '')
+        if link and link not in seen_links:
+            seen_links.add(link)
+            deduplicated.append(item)
+    logger.info(f"Items after deduplication: {len(deduplicated)}")
 
-    # 5) Build and write aggregated RSS
-    rss_xml = build_feed(final)
+    # 5) Build and write RSS feed
+    logger.info("Step 5: Building and writing RSS feed...")
+    rss_xml = build_feed(deduplicated)
     with open(OUTPUT_PATH, "wb") as f:
         f.write(rss_xml)
-    print(f"[INFO] Step 5: RSS written: {OUTPUT_PATH}")
-    print(f"[INFO] Final feed contains {len(final)} items")
+    logger.info(f"RSS feed written to {OUTPUT_PATH}")
+    logger.info(f"Final feed contains {len(deduplicated)} items")
 
 
 if __name__ == "__main__":
