@@ -19,11 +19,11 @@ Automatically collects and publishes Zscaler release notes from help.zscaler.com
 ## How It Works
 
 1. **Sitemap Parsing**: Fetches and parses the complete sitemap from help.zscaler.com to discover site structure (parallel parsing for nested sitemaps)
-2. **RSS Feed Discovery**: 
-   - Checks for RSS feeds at base URL (https://help.zscaler.com/rss)
-   - Discovers product sections from sitemap (e.g., /zia, /zpa, /zdx)
-   - Checks for RSS feeds at each section path
-   - Looks for RSS feed links in HTML pages
+2. **RSS Feed Discovery** (prioritized strategies):
+   - **Primary**: Scrapes the HTML directory page at https://help.zscaler.com/rss to find all RSS feed links (pattern: `/rss-feed/{product}/release-upgrade-summary-{year}/zscaler.net`)
+   - **Fallback 1**: Checks for RSS feeds at base URL common paths
+   - **Fallback 2**: Discovers product sections from sitemap (e.g., /zia, /zpa, /zdx) and checks for RSS feeds at each section path
+   - **Fallback 3**: Looks for RSS feed links in HTML pages
    - All checks run in parallel for maximum efficiency
 3. **RSS Feed Aggregation**: Parses all discovered RSS feeds concurrently and aggregates items
 4. **Smart Fallback**: If no RSS feeds are found, falls back to:
@@ -115,18 +115,26 @@ The generated RSS feed includes:
 
 ## RSS Feed Discovery
 
-The script discovers RSS feeds through multiple strategies:
+The script discovers RSS feeds through multiple prioritized strategies:
 
-1. **Base URL Check**: Tests common RSS paths (`/rss`, `/feed`, `/rss.xml`, etc.) at base URL
-2. **Section Discovery**: Extracts product sections from sitemap (e.g., `/zia/`, `/zpa/`, `/zdx/`)
-3. **Section RSS Feeds**: Checks for RSS feeds at each discovered section path
-4. **HTML Link Tags**: Parses pages for RSS feed links in `<link>` tags
-5. **Anchor Links**: Searches for RSS feed links in page content
+1. **Primary Strategy - RSS Directory Scraping** (as per Zscaler_RSS_Feed_Guide.md):
+   - Scrapes the HTML directory page at `https://help.zscaler.com/rss`
+   - Extracts all RSS feed links matching the pattern `/rss-feed/{product}/release-upgrade-summary-{year}/zscaler.net`
+   - Examples: `/rss-feed/zia/...`, `/rss-feed/zpa/...`, `/rss-feed/zdx/...`
+   - This is the most reliable method as the directory page lists all available feeds
+
+2. **Fallback Strategies** (only if primary strategy finds no feeds):
+   - **Base URL Check**: Tests common RSS paths (`/rss`, `/feed`, `/rss.xml`, etc.)
+   - **Section Discovery**: Extracts product sections from sitemap (e.g., `/zia/`, `/zpa/`, `/zdx/`)
+   - **Section RSS Feeds**: Checks for RSS feeds at each discovered section path
+   - **HTML Link Tags**: Parses pages for RSS feed links in `<link>` tags
+   - **Anchor Links**: Searches for RSS feed links in page content
 
 This approach ensures:
-- **Comprehensive Coverage**: All product sections are included
-- **Future-Proof**: New sections are automatically discovered
-- **Resilient**: Falls back to page scraping if RSS feeds are unavailable
+- **Comprehensive Coverage**: All product sections are included by scraping the directory
+- **Reliable Discovery**: Primary strategy directly uses the official RSS directory page
+- **Future-Proof**: New products/sections are automatically discovered
+- **Resilient**: Multiple fallback strategies ensure feeds are found
 - **High Performance**: Parallel execution reduces total runtime by 60-80%
 
 ## Performance Optimizations
@@ -172,25 +180,34 @@ When making changes, ensure:
 
 ### RSS Feed Discovery Process
 
-The `discover_rss_feeds()` function implements a comprehensive discovery strategy:
+The `discover_rss_feeds()` function implements a prioritized discovery strategy:
 
 ```python
-# 1. Check base URL
+# 1. PRIMARY: Scrape /rss directory page for feed links
+html = fetch(BASE + "/rss")
+for link in parse_html(html):
+    if '/rss-feed/' in link:
+        discovered_feeds.add(link)  # e.g., /rss-feed/zia/release-upgrade-summary-2025/zscaler.net
+
+# 2. FALLBACK (only if primary strategy found no feeds):
+# Check base URL
 for path in ['/rss', '/feed', '/rss.xml', '/feed.xml', '/atom.xml']:
     check(BASE + path)
 
-# 2. Extract sections from sitemap URLs
+# 3. Extract sections from sitemap URLs
 sections = extract_path_prefixes(sitemap_urls)  # e.g., /zia, /zpa, /zdx
 
-# 3. Check each section for RSS feeds
+# 4. Check each section for RSS feeds
 for section in sections:
     for path in RSS_PATHS:
         check(BASE + section + path)
 
-# 4. Parse HTML pages for RSS links
+# 5. Parse HTML pages for RSS links
 for page in key_pages:
     find_rss_links_in_html(page)
 ```
+
+**Key Improvement**: The primary strategy directly scrapes the `/rss` directory page (which is HTML, not RSS) to find all actual RSS feed URLs. This follows the guidance in `Zscaler_RSS_Feed_Guide.md` and ensures all product feeds are discovered reliably.
 
 ### RSS Feed Parsing
 
