@@ -1,45 +1,25 @@
 #!/usr/bin/env python3
 """
 Tests for RSS feed generation script.
-Uses mocking to simulate HTTP responses from help.zscaler.com.
 """
 
 import sys
 import os
 from datetime import datetime, timezone
-from unittest.mock import Mock, patch, MagicMock
-from io import BytesIO
+from unittest.mock import Mock, patch
 
 # Add parent directory to path to import the script
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
-from scripts.generate_rss import (
-    get_all_products,
+from generate_rss import (
+    get_feed_urls,
     parse_rss_feed,
     build_feed,
-    normalize_date
+    KNOWN_PRODUCTS
 )
 
-
-# Mock HTML content for /rss directory page
-MOCK_RSS_DIRECTORY_HTML = """
-<!DOCTYPE html>
-<html>
-<head><title>RSS Feeds</title></head>
-<body>
-    <h1>Zscaler RSS Feeds</h1>
-    <ul>
-        <li><a href="/rss-feed/zia/release-upgrade-summary-2025/zscaler.net">ZIA RSS Feed</a></li>
-        <li><a href="/rss-feed/zpa/release-upgrade-summary-2025/zscaler.net">ZPA RSS Feed</a></li>
-        <li><a href="/rss-feed/experience-center/release-upgrade-summary-2025/zscaler.net">Experience Center RSS Feed</a></li>
-        <li><a href="/rss-feed/zdx/release-upgrade-summary-2025/zscaler.net">ZDX RSS Feed</a></li>
-    </ul>
-</body>
-</html>
-"""
-
 # Mock RSS feed content (RSS 2.0 format)
-MOCK_RSS_FEED_ZIA = """<?xml version="1.0" encoding="UTF-8"?>
+MOCK_RSS_FEED = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
 <channel>
     <title>ZIA Release Notes</title>
@@ -63,56 +43,31 @@ MOCK_RSS_FEED_ZIA = """<?xml version="1.0" encoding="UTF-8"?>
 </rss>
 """
 
-MOCK_RSS_FEED_ZPA = """<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-<channel>
-    <title>ZPA Release Notes</title>
-    <link>https://help.zscaler.com/zpa</link>
-    <description>ZPA Release Notes</description>
-    <item>
-        <title>New Access Policy</title>
-        <link>https://help.zscaler.com/zpa/access-policy</link>
-        <pubDate>Wed, 18 Dec 2024 09:00:00 +0000</pubDate>
-        <guid>https://help.zscaler.com/zpa/access-policy</guid>
-        <description>New access policy features in ZPA</description>
-    </item>
-</channel>
-</rss>
-"""
 
-
-def test_discover_rss_feeds_from_directory():
-    """Test that products are discovered and feed URLs are generated."""
+def test_get_feed_urls():
+    """Test that feed URLs are generated correctly for a given year."""
+    feed_urls = get_feed_urls(2025)
     
-    # Test that we can get all products
-    products = get_all_products()
+    print(f"Generated {len(feed_urls)} feed URLs:")
+    for url in sorted(feed_urls):
+        print(f"  - {url}")
     
-    print(f"Discovered {len(products)} products:")
-    for product_slug, domain in sorted(products):
-        print(f"  - {product_slug} ({domain})")
+    # Should generate URLs for all known products
+    assert len(feed_urls) == len(KNOWN_PRODUCTS), f"Expected {len(KNOWN_PRODUCTS)} feeds, found {len(feed_urls)}"
     
-    # Should find at least the known products
-    assert len(products) >= 4, f"Expected at least 4 products, found {len(products)}"
+    # Check that URLs contain the year
+    for url in feed_urls:
+        assert "2025" in url, f"URL should contain year 2025: {url}"
     
-    # Check for specific products
-    product_slugs = {slug for slug, domain in products}
-    assert "zia" in product_slugs, "ZIA product not found"
-    assert "zpa" in product_slugs, "ZPA product not found"
-    assert "zdx" in product_slugs, "ZDX product not found"
-    
-    print("✓ test_discover_rss_feeds_from_directory passed")
+    print("✓ test_get_feed_urls passed")
 
 
 def test_parse_rss_feed():
     """Test that RSS feeds are correctly parsed."""
     
-    def mock_fetch(url, timeout=30):
-        """Mock fetch function."""
-        return MOCK_RSS_FEED_ZIA
-    
     with patch('requests.get') as mock_get:
         mock_response = Mock()
-        mock_response.content = MOCK_RSS_FEED_ZIA.encode('utf-8')
+        mock_response.content = MOCK_RSS_FEED.encode('utf-8')
         mock_response.raise_for_status.return_value = None
         mock_get.return_value = mock_response
         
@@ -122,7 +77,7 @@ def test_parse_rss_feed():
         for item in items:
             print(f"  - {item['title']}")
         
-        # Should find 2 items from ZIA feed
+        # Should find 2 items from the mock feed
         assert len(items) == 2, f"Expected 2 items, found {len(items)}"
         
         # Check item details
@@ -143,14 +98,14 @@ def test_build_feed():
             "link": "https://help.zscaler.com/test1",
             "description": "Description for test item 1",
             "published": datetime(2024, 12, 20, 10, 0, 0, tzinfo=timezone.utc),
-            "source_page": "https://help.zscaler.com/rss-feed/zia/test"
+            "category": "Available"
         },
         {
             "title": "Test Item 2",
             "link": "https://help.zscaler.com/test2",
             "description": "Description for test item 2",
             "published": datetime(2024, 12, 19, 10, 0, 0, tzinfo=timezone.utc),
-            "source_page": "https://help.zscaler.com/rss-feed/zpa/test"
+            "category": "Limited"
         }
     ]
     
@@ -171,31 +126,13 @@ def test_build_feed():
     print("✓ test_build_feed passed")
 
 
-def test_normalize_date():
-    """Test date normalization."""
-    
-    # Test RFC 2822 format
-    date1 = normalize_date("Mon, 16 Dec 2024 10:00:00 +0000")
-    assert date1.year == 2024
-    assert date1.month == 12
-    assert date1.day == 16
-    
-    # Test ISO format
-    date2 = normalize_date("2024-12-16T10:00:00Z")
-    assert date2.year == 2024
-    assert date2.month == 12
-    
-    print("✓ test_normalize_date passed")
-
-
 if __name__ == "__main__":
     print("Running RSS generation tests...\n")
     
     try:
-        test_discover_rss_feeds_from_directory()
+        test_get_feed_urls()
         test_parse_rss_feed()
         test_build_feed()
-        test_normalize_date()
         
         print("\n✅ All tests passed!")
     except AssertionError as e:
