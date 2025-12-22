@@ -142,7 +142,7 @@ The script uses several techniques to maximize performance:
 2. **Connection Pooling**: Uses `requests.Session` with connection pooling
    - Reuses TCP connections across requests
    - Reduces connection overhead
-   - Configured with 20 concurrent connections
+   - Pool size matches MAX_WORKERS for optimal resource usage
 
 3. **Configurable Concurrency**: `MAX_WORKERS = 10` controls parallel execution
    - Balances performance with politeness
