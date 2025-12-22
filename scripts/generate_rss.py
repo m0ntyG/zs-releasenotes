@@ -62,6 +62,11 @@ def get_rss_feeds() -> Set[str]:
     logger.info(f"Checking RSS feeds for year {current_year}...")
     feed_urls = get_feed_urls(current_year)
     
+    # Ensure we have feeds to validate
+    if not feed_urls:
+        logger.error("No feed URLs generated - check KNOWN_PRODUCTS configuration")
+        return set()
+    
     # Quick validation: check if any feeds are accessible
     sample_url = next(iter(feed_urls))
     try:
@@ -75,26 +80,28 @@ def get_rss_feeds() -> Set[str]:
     # Try previous year as fallback
     logger.info(f"Trying previous year {current_year - 1}...")
     prev_year_urls = get_feed_urls(current_year - 1)
-    sample_url = next(iter(prev_year_urls))
-    try:
-        response = requests.head(sample_url, headers=HEADERS, timeout=10)
-        if response.status_code == 200:
-            logger.info(f"Found active feeds for year {current_year - 1}")
-            return prev_year_urls
-    except Exception as e:
-        logger.warning(f"Could not verify feeds for year {current_year - 1}: {e}")
+    if prev_year_urls:
+        sample_url = next(iter(prev_year_urls))
+        try:
+            response = requests.head(sample_url, headers=HEADERS, timeout=10)
+            if response.status_code == 200:
+                logger.info(f"Found active feeds for year {current_year - 1}")
+                return prev_year_urls
+        except Exception as e:
+            logger.warning(f"Could not verify feeds for year {current_year - 1}: {e}")
     
     # Try next year as fallback (useful in December/January)
     logger.info(f"Trying next year {current_year + 1}...")
     next_year_urls = get_feed_urls(current_year + 1)
-    sample_url = next(iter(next_year_urls))
-    try:
-        response = requests.head(sample_url, headers=HEADERS, timeout=10)
-        if response.status_code == 200:
-            logger.info(f"Found active feeds for year {current_year + 1}")
-            return next_year_urls
-    except Exception as e:
-        logger.warning(f"Could not verify feeds for year {current_year + 1}: {e}")
+    if next_year_urls:
+        sample_url = next(iter(next_year_urls))
+        try:
+            response = requests.head(sample_url, headers=HEADERS, timeout=10)
+            if response.status_code == 200:
+                logger.info(f"Found active feeds for year {current_year + 1}")
+                return next_year_urls
+        except Exception as e:
+            logger.warning(f"Could not verify feeds for year {current_year + 1}: {e}")
     
     # Fallback to current year if all validations fail
     logger.warning("All year validations failed, using current year feeds")
@@ -298,7 +305,12 @@ def main():
     
     # 3) Apply time window filter
     logger.info(f"Step 3: Filtering items within last {BACKFILL_DAYS} days...")
-    filtered = [item for item in aggregated if item.get('published') and item['published'] > cutoff]
+    filtered = []
+    for item in aggregated:
+        pub_date = item.get('published')
+        # Ensure published date exists and is valid
+        if pub_date and isinstance(pub_date, datetime) and pub_date > cutoff:
+            filtered.append(item)
     logger.info(f"Items within time window: {len(filtered)}")
     
     # 4) Deduplicate by link
