@@ -28,6 +28,7 @@ from bs4 import BeautifulSoup
 from feedgen.feed import FeedGenerator
 from dateutil import parser as dateparser
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 BASE = "https://help.zscaler.com"
 SITEMAP_URL = f"{BASE}/sitemap.xml"
@@ -76,22 +77,26 @@ MAX_SECTION_PAGES_TO_CHECK = 10
 
 # Global session for connection pooling
 _session: Optional[requests.Session] = None
+_session_lock = threading.Lock()
 
 
 def get_session() -> requests.Session:
-    """Get or create a global requests session for connection pooling."""
+    """Get or create a global requests session for connection pooling. Thread-safe."""
     global _session
     if _session is None:
-        _session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(
-            pool_connections=20,
-            pool_maxsize=20,
-            max_retries=3,
-            pool_block=False
-        )
-        _session.mount('http://', adapter)
-        _session.mount('https://', adapter)
-        _session.headers.update(HEADERS)
+        with _session_lock:
+            # Double-check pattern to avoid race condition
+            if _session is None:
+                _session = requests.Session()
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=20,
+                    pool_maxsize=20,
+                    max_retries=3,
+                    pool_block=False  # Raise exception instead of blocking when pool is exhausted
+                )
+                _session.mount('http://', adapter)
+                _session.mount('https://', adapter)
+                _session.headers.update(HEADERS)
     return _session
 
 
@@ -173,8 +178,10 @@ def parse_sitemap(url: str) -> List[str]:
         # Parallel fetch of nested sitemaps
         if nested_sitemaps:
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                future_to_url = {executor.submit(parse_sitemap, sitemap_url): sitemap_url 
-                                for sitemap_url in nested_sitemaps}
+                future_to_url = {
+                    executor.submit(parse_sitemap, sitemap_url): sitemap_url
+                    for sitemap_url in nested_sitemaps
+                }
                 for future in as_completed(future_to_url):
                     try:
                         urls.extend(future.result())
@@ -315,8 +322,10 @@ def discover_rss_feeds(base_url: str, sitemap_urls: List[str]) -> Set[str]:
         return feeds
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_page = {executor.submit(find_rss_in_page, page_url): page_url 
-                         for page_url in key_pages}
+        future_to_page = {
+            executor.submit(find_rss_in_page, page_url): page_url
+            for page_url in key_pages
+        }
         for future in as_completed(future_to_page):
             try:
                 feeds = future.result()
@@ -584,8 +593,10 @@ def main():
         print("[INFO] Step 3: Parsing discovered RSS feeds in parallel...")
         
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_feed = {executor.submit(parse_rss_feed, feed_url): feed_url 
-                            for feed_url in discovered_feeds}
+            future_to_feed = {
+                executor.submit(parse_rss_feed, feed_url): feed_url
+                for feed_url in discovered_feeds
+            }
             for future in as_completed(future_to_feed):
                 feed_url = future_to_feed[future]
                 try:
