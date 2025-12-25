@@ -51,61 +51,100 @@ def get_feed_urls(year: int) -> Set[str]:
     return feed_urls
 
 
-def get_rss_feeds() -> Set[str]:
+def discover_valid_years(year_range: int = 3) -> List[int]:
     """
-    Get RSS feed URLs with automatic year selection.
-    Tries current year first, then falls back to previous/next year if needed.
+    Automatically discover which years have valid RSS feeds.
+    Tests a range of years in parallel to find all valid feeds.
+    
+    Args:
+        year_range: Number of years to look back from current year (default: 3)
+    
+    Returns:
+        List of years with valid RSS feeds, sorted descending (most recent first)
     """
     current_year = datetime.now().year
+    # Check from current year to (current - year_range) years, plus next year
+    years_to_check = list(range(current_year - year_range, current_year + 2))
     
-    # Try current year first
-    logger.info(f"Checking RSS feeds for year {current_year}...")
-    feed_urls = get_feed_urls(current_year)
+    logger.info(f"Discovering valid years from {years_to_check[0]} to {years_to_check[-1]}...")
     
-    # Ensure we have feeds to validate
-    if not feed_urls:
+    valid_years = []
+    
+    # Test each year in parallel using a sample product
+    if not KNOWN_PRODUCTS:
+        logger.error("No products configured in KNOWN_PRODUCTS")
+        return [current_year]
+    
+    sample_product, sample_domain = KNOWN_PRODUCTS[0]
+    
+    def check_year(year: int) -> Optional[int]:
+        """Check if a year has valid RSS feeds."""
+        url = f"https://help.zscaler.com/rss-feed/{sample_product}/release-upgrade-summary-{year}/{sample_domain}"
+        try:
+            response = requests.head(url, headers=HEADERS, timeout=10)
+            if response.status_code == 200:
+                logger.info(f"✓ Year {year} has valid RSS feeds")
+                return year
+        except Exception as e:
+            logger.debug(f"Year {year} not available: {e}")
+        return None
+    
+    with ThreadPoolExecutor(max_workers=min(len(years_to_check), 5)) as executor:
+        future_to_year = {executor.submit(check_year, year): year for year in years_to_check}
+        for future in as_completed(future_to_year):
+            result = future.result()
+            if result is not None:
+                valid_years.append(result)
+    
+    # Sort by year descending (most recent first)
+    valid_years.sort(reverse=True)
+    
+    if not valid_years:
+        logger.warning(f"No valid years found, defaulting to current year {current_year}")
+        return [current_year]
+    
+    logger.info(f"Found {len(valid_years)} valid year(s): {valid_years}")
+    return valid_years
+
+
+def get_rss_feeds() -> Set[str]:
+    """
+    Get RSS feed URLs with automatic year discovery.
+    Discovers all valid years and generates feed URLs for all of them.
+    """
+    # Discover which years have valid RSS feeds
+    valid_years = discover_valid_years()
+    
+    # Generate feed URLs for all valid years
+    all_feed_urls = set()
+    for year in valid_years:
+        year_feeds = get_feed_urls(year)
+        all_feed_urls.update(year_feeds)
+        logger.info(f"Added {len(year_feeds)} feed URLs for year {year}")
+    
+    if not all_feed_urls:
         logger.error("No feed URLs generated - check KNOWN_PRODUCTS configuration")
         return set()
     
-    # Quick validation: check if any feeds are accessible
-    sample_url = next(iter(feed_urls))
+    logger.info(f"Total RSS feed URLs across all years: {len(all_feed_urls)}")
+    return all_feed_urls
+
+
+def validate_feed_url(feed_url: str) -> bool:
+    """
+    Validate if a feed URL exists and is accessible.
+    
+    Args:
+        feed_url: The RSS feed URL to validate
+    
+    Returns:
+        True if feed exists (status 200), False otherwise
+    """
     try:
-        response = requests.head(sample_url, headers=HEADERS, timeout=10)
-        if response.status_code == 200:
-            logger.info(f"Found active feeds for year {current_year}")
-            return feed_urls
-    except Exception as e:
-        logger.warning(f"Could not verify feeds for year {current_year}: {e}")
-    
-    # Try previous year as fallback
-    logger.info(f"Trying previous year {current_year - 1}...")
-    prev_year_urls = get_feed_urls(current_year - 1)
-    if prev_year_urls:
-        sample_url = next(iter(prev_year_urls))
-        try:
-            response = requests.head(sample_url, headers=HEADERS, timeout=10)
-            if response.status_code == 200:
-                logger.info(f"Found active feeds for year {current_year - 1}")
-                return prev_year_urls
-        except Exception as e:
-            logger.warning(f"Could not verify feeds for year {current_year - 1}: {e}")
-    
-    # Try next year as fallback (useful in December/January)
-    logger.info(f"Trying next year {current_year + 1}...")
-    next_year_urls = get_feed_urls(current_year + 1)
-    if next_year_urls:
-        sample_url = next(iter(next_year_urls))
-        try:
-            response = requests.head(sample_url, headers=HEADERS, timeout=10)
-            if response.status_code == 200:
-                logger.info(f"Found active feeds for year {current_year + 1}")
-                return next_year_urls
-        except Exception as e:
-            logger.warning(f"Could not verify feeds for year {current_year + 1}: {e}")
-    
-    # Fallback to current year if all validations fail
-    logger.warning("All year validations failed, using current year feeds")
-    return feed_urls
+        response = requests.head(feed_url, headers=HEADERS, timeout=10)
+        return response.status_code == 200
+    except Exception:
+        return False
 
 
 def parse_rss_feed(feed_url: str) -> List[Dict]:
@@ -269,30 +308,58 @@ def main():
     Main function to generate RSS feed.
     
     Process:
-    1. Get RSS feed URLs for current year (with fallback logic)
-    2. Parse all RSS feeds and aggregate items (parallel)
-    3. Apply time window filter (BACKFILL_DAYS)
-    4. Deduplicate by link
-    5. Sort by date and build aggregated RSS feed
+    1. Discover valid years with RSS feeds
+    2. Generate RSS feed URLs for all valid years
+    3. Validate feeds in parallel (filter non-existent feeds)
+    4. Parse valid RSS feeds and aggregate items (parallel)
+    5. Apply time window filter (BACKFILL_DAYS)
+    6. Deduplicate by link
+    7. Sort by date and build aggregated RSS feed
     """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     BACKFILL_DAYS = int(os.getenv("BACKFILL_DAYS", "14"))
     cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
     
-    # 1) Get RSS feed URLs with year fallback
-    logger.info("Step 1: Getting RSS feed URLs...")
+    # 1) Get RSS feed URLs with automatic year discovery
+    logger.info("Step 1: Discovering valid years and getting RSS feed URLs...")
     feed_urls = get_rss_feeds()
-    logger.info(f"Using {len(feed_urls)} RSS feeds")
+    logger.info(f"Generated {len(feed_urls)} potential RSS feed URLs")
     
-    # 2) Parse all RSS feeds (parallel)
-    logger.info("Step 2: Parsing RSS feeds in parallel...")
+    # 2) Validate feeds in parallel to filter out non-existent ones
+    logger.info("Step 2: Validating feed URLs in parallel...")
+    valid_feed_urls = []
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_url = {
+            executor.submit(validate_feed_url, url): url
+            for url in feed_urls
+        }
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                if future.result():
+                    valid_feed_urls.append(url)
+            except Exception as e:
+                logger.debug(f"Validation error for {url}: {e}")
+    
+    logger.info(f"Found {len(valid_feed_urls)} valid RSS feeds (filtered {len(feed_urls) - len(valid_feed_urls)} non-existent)")
+    
+    if not valid_feed_urls:
+        logger.warning("No valid RSS feeds found, generating empty feed")
+        rss_xml = build_feed([])
+        with open(OUTPUT_PATH, "wb") as f:
+            f.write(rss_xml)
+        return
+    
+    # 3) Parse all valid RSS feeds (parallel)
+    logger.info("Step 3: Parsing valid RSS feeds in parallel...")
     aggregated: List[Dict] = []
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_feed = {
             executor.submit(parse_rss_feed, feed_url): feed_url
-            for feed_url in feed_urls
+            for feed_url in valid_feed_urls
         }
         for future in as_completed(future_to_feed):
             try:
@@ -303,8 +370,8 @@ def main():
     
     logger.info(f"Total items from RSS feeds: {len(aggregated)}")
     
-    # 3) Apply time window filter
-    logger.info(f"Step 3: Filtering items within last {BACKFILL_DAYS} days...")
+    # 4) Apply time window filter
+    logger.info(f"Step 4: Filtering items within last {BACKFILL_DAYS} days...")
     filtered = []
     for item in aggregated:
         pub_date = item.get('published')
@@ -313,8 +380,8 @@ def main():
             filtered.append(item)
     logger.info(f"Items within time window: {len(filtered)}")
     
-    # 4) Deduplicate by link
-    logger.info("Step 4: Deduplicating by link...")
+    # 5) Deduplicate by link
+    logger.info("Step 5: Deduplicating by link...")
     seen_links = set()
     deduplicated = []
     for item in sorted(filtered, key=lambda x: x.get('published', datetime.min.replace(tzinfo=timezone.utc)), reverse=True):
@@ -324,8 +391,8 @@ def main():
             deduplicated.append(item)
     logger.info(f"Items after deduplication: {len(deduplicated)}")
     
-    # 5) Build and write RSS feed
-    logger.info("Step 5: Building RSS feed...")
+    # 6) Build and write RSS feed
+    logger.info("Step 6: Building RSS feed...")
     rss_xml = build_feed(deduplicated)
     with open(OUTPUT_PATH, "wb") as f:
         f.write(rss_xml)

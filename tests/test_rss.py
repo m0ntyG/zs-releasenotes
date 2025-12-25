@@ -15,6 +15,8 @@ from generate_rss import (
     get_feed_urls,
     parse_rss_feed,
     build_feed,
+    discover_valid_years,
+    validate_feed_url,
     KNOWN_PRODUCTS
 )
 
@@ -126,6 +128,60 @@ def test_build_feed():
     print("✓ test_build_feed passed")
 
 
+def test_discover_valid_years():
+    """Test that valid years are discovered correctly."""
+    from unittest.mock import patch, Mock
+    
+    # Mock the requests.head to simulate valid years 2024 and 2025
+    def mock_head(url, *args, **kwargs):
+        mock_response = Mock()
+        if '2024' in url or '2025' in url:
+            mock_response.status_code = 200
+        else:
+            mock_response.status_code = 404
+        return mock_response
+    
+    with patch('generate_rss.requests.head', side_effect=mock_head):
+        # Test with year_range=3 which should check 2022-2026
+        years = discover_valid_years(year_range=3)
+        
+        print(f"Discovered {len(years)} valid year(s): {years}")
+        
+        # Should find 2024 and 2025 (the years we mocked as valid)
+        assert len(years) >= 1, "Should find at least one valid year"
+        assert years[0] >= years[-1], "Years should be sorted descending"
+        
+    print("✓ test_discover_valid_years passed")
+
+
+def test_validate_feed_url():
+    """Test that feed URL validation works correctly."""
+    from unittest.mock import patch, Mock
+    import requests
+    
+    # Mock the requests.head - need to patch it in the generate_rss module
+    def mock_head(url, *args, **kwargs):
+        mock_response = Mock(spec=requests.Response)
+        if 'working' in url:  # Changed from 'valid' to 'working'
+            mock_response.status_code = 200
+        else:
+            mock_response.status_code = 404
+        return mock_response
+    
+    with patch('generate_rss.requests.head', side_effect=mock_head):
+        # Test valid URL
+        is_valid = validate_feed_url("https://example.com/working-feed")
+        print(f"Valid feed result: {is_valid}")
+        assert is_valid is True, f"Valid feed should return True, got {is_valid}"
+        
+        # Test invalid URL
+        is_invalid = validate_feed_url("https://example.com/broken-feed")
+        print(f"Invalid feed result: {is_invalid}")
+        assert is_invalid is False, f"Invalid feed should return False, got {is_invalid}"
+        
+    print("✓ test_validate_feed_url passed")
+
+
 if __name__ == "__main__":
     print("Running RSS generation tests...\n")
     
@@ -133,6 +189,8 @@ if __name__ == "__main__":
         test_get_feed_urls()
         test_parse_rss_feed()
         test_build_feed()
+        test_discover_valid_years()
+        test_validate_feed_url()
         
         print("\n✅ All tests passed!")
     except AssertionError as e:
