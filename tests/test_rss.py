@@ -159,10 +159,12 @@ def test_validate_feed_url():
     from unittest.mock import patch, Mock
     import requests
     
-    # Mock the requests.head - need to patch it in the generate_rss module
+    # Mock requests.head in the generate_rss module context
+    # (patching where it's used, not where it's imported from)
     def mock_head(url, *args, **kwargs):
         mock_response = Mock(spec=requests.Response)
-        if 'working' in url:  # Changed from 'valid' to 'working'
+        # Use 'working' instead of 'valid' since 'invalid' contains 'valid'
+        if 'working' in url:
             mock_response.status_code = 200
         else:
             mock_response.status_code = 404
