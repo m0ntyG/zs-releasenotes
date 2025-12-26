@@ -69,4 +69,4 @@ with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
 - Python 3.12+ required
 - Feed URL pattern: `/rss-feed/{product}/release-upgrade-summary-{year}/{domain}`
 - Max 10 parallel workers (configurable in `rss_config.py`)
-- Dependencies: uv (package manager), feedgen, python-dateutil, requests, beautifulsoup4, lxml
+- Dependencies: uv (package manager), feedgen, python-dateutil, requests, lxml
