@@ -25,7 +25,7 @@ uv run python tests/test_rss.py             # Run tests
 ## Critical Conventions
 
 ### Date Handling (REQUIRED)
-- Use 4-digit years in regex: `\d{4}` never `\d{2,4}`
+- Year handling: Use integers from `datetime.now().year` (no regex/string parsing needed)
 - Always timezone-aware UTC: `datetime.now(timezone.utc)`
 - Use `dateparser.parse()` for flexibility (handles RFC 2822, ISO 8601, etc.)
 - `timedelta` backfill works across year boundaries
@@ -69,4 +69,4 @@ with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
 - Python 3.12+ required
 - Feed URL pattern: `/rss-feed/{product}/release-upgrade-summary-{year}/{domain}`
 - Max 10 parallel workers (configurable in `rss_config.py`)
-- Dependencies: uv (package manager), feedgen, python-dateutil, requests, lxml
+- Dependencies: uv (package manager), feedgen, python-dateutil, requests, beautifulsoup4, lxml
