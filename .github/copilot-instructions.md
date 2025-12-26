@@ -27,7 +27,7 @@ uv run python tests/test_rss.py             # Run tests
 ### Date Handling (REQUIRED)
 - Year handling: Use `datetime.now().year` for integer year values
 - Always timezone-aware UTC for timestamps: `datetime.now(timezone.utc)`
-- Use `dateparser.parse()` (from `dateutil` library) for flexible date parsing
+- Use `dateparser.parse()` for flexible date parsing (import: `from dateutil import parser as dateparser`)
 - `timedelta` backfill works across year boundaries
 
 ### Adding Products
