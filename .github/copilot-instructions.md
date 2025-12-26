@@ -9,7 +9,7 @@ Aggregates Zscaler release notes from help.zscaler.com into a single RSS feed pu
 - **`.github/workflows/zscaler-release-rss.yml`**: Runs twice daily, publishes to gh-pages
 
 ## Why This Architecture
-- **Curated products**: Zscaler's RSS directory is React (not scrapable) → maintain list in `rss_config.py`
+- **Curated products**: Zscaler's RSS directory uses React (not scrapable) → maintain list in `rss_config.py`
 - **Parallel execution**: ~18 products × 4 years = 72+ feeds → ThreadPoolExecutor for I/O
 - **Year discovery**: Auto-detects valid years via HTTP HEAD → no manual updates needed
 - **HEAD validation**: Filters non-existent feeds before GET → avoids wasted requests
